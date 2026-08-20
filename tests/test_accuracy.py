@@ -264,35 +264,38 @@ class ConfidenceTest(unittest.TestCase):
         self.assertEqual(words[1].speaker, "A",
                          "neighbours disagree at a real boundary; leave it")
 
-    def test_threshold_is_honoured_end_to_end(self):
+    def test_threshold_is_honoured_by_the_neighbour_search(self):
         """Both halves of the decision must use the caller's threshold.
 
-        A hardcoded cutoff inside the neighbour search would make the pass
-        incoherent at any setting other than the default: a word could be
-        treated as unsure when selecting it, then as confident when it is
-        someone else's neighbour.
+        The neighbour search once tested a hardcoded 0.5 while the caller
+        chose which words to correct using its own threshold. At any other
+        setting the two disagreed: a word could be too unsure to trust as an
+        answer, yet confident enough to serve as someone else's neighbour.
+
+        Catching that needs a specific shape — the neighbours must sit
+        *between* the hardcoded cutoff and the caller's threshold, and at
+        least one word must clear the threshold or an early return fires
+        first and hides the difference.
         """
         def build():
             return [
-                Word(0.0, 0.4, "one", "A", speaker_confidence=0.62),
-                Word(0.5, 0.9, "two", "B", speaker_confidence=0.55),
-                Word(1.0, 1.4, "three", "A", speaker_confidence=0.62),
+                Word(0.0, 0.4, "one", "A", speaker_confidence=0.55),   # 0.5 < c < 0.8
+                Word(0.5, 0.9, "two", "B", speaker_confidence=0.30),   # the candidate
+                Word(1.0, 1.4, "three", "A", speaker_confidence=0.55),
+                Word(1.5, 1.9, "four", "A", speaker_confidence=0.95),  # clears any threshold
             ]
 
-        # At 0.5 nothing is unsure, so nothing moves.
+        # At 0.5 the flanking words are confident, so the middle word moves.
         low = build()
         resolve_low_confidence(low, threshold=0.5)
-        self.assertEqual([w.speaker for w in low], ["A", "B", "A"])
+        self.assertEqual(low[1].speaker, "A")
 
-        # At 0.6 the middle word is unsure and its neighbours are confident.
+        # At 0.8 they are not confident enough to be trusted as an answer, so
+        # the middle word must be left alone. A hardcoded 0.5 would move it.
         high = build()
-        resolve_low_confidence(high, threshold=0.6)
-        self.assertEqual([w.speaker for w in high], ["A", "A", "A"])
-
-        # At 0.7 the neighbours are unsure too, so there is nothing to trust.
-        higher = build()
-        resolve_low_confidence(higher, threshold=0.7)
-        self.assertEqual([w.speaker for w in higher], ["A", "B", "A"])
+        resolve_low_confidence(high, threshold=0.8)
+        self.assertEqual(high[1].speaker, "B",
+                         "neighbours below the caller's threshold must not decide")
 
     def test_distant_neighbours_are_not_consulted(self):
         words = [

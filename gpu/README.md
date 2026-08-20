@@ -45,9 +45,16 @@ wheel index stops at torch 2.6 — so a 12.4 image cannot satisfy the diarizer a
 all. CTranslate2 also links against cuDNN 9, which this base image provides. If
 you change either pin, check both constraints still hold.
 
-The dependency set has been verified to install: torch 2.8.0+cu126,
+The dependency set has been verified to install and import: torch 2.8.0+cu126,
 torchaudio 2.8.0+cu126, torchcodec 0.7.0, pyannote.audio 4.0.7,
 faster-whisper 1.2.1, ctranslate2 4.8.1.
+
+One non-obvious apt package is load-bearing: `libpython3.10`. pyannote decodes
+audio through torchcodec, whose FFmpeg backend dlopens `libpython3.10.so.1.0`,
+and the CUDA base image does not ship it. Without it torchcodec fails to load —
+as a *warning*, not an error — pyannote cannot read the audio, and the worker
+returns transcripts with no speaker labels. If you slim the image down, keep
+that package.
 
 ## 3. Create the RunPod endpoint
 

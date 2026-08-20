@@ -65,11 +65,28 @@ def get_whisper(name=None):
     return _whisper, _batched
 
 
+def check_audio_backend():
+    """Fail loudly if torchcodec cannot load its FFmpeg backend.
+
+    pyannote decodes through torchcodec, which only warns when its backend is
+    missing — so the first sign is speaker labels quietly disappearing. Better
+    to say so on the job than to return a one-speaker transcript.
+    """
+    try:
+        from torchcodec.decoders import AudioDecoder      # noqa: F401
+        return True
+    except Exception as e:                                # noqa: BLE001
+        log(f"WARNING: torchcodec unavailable ({e}); diarization will likely fail. "
+            "The image is missing libpython3.10.")
+        return False
+
+
 def get_diarizer():
     global _diarizer
     if _diarizer is None:
         import torch
         from pyannote.audio import Pipeline
+        check_audio_backend()
         t = time.time()
         log(f"loading diarizer {DIARIZER_NAME}")
         _diarizer = Pipeline.from_pretrained(DIARIZER_NAME, token=HF_TOKEN or None)

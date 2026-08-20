@@ -12,8 +12,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HF_HOME=/models/hf \
     TORCH_HOME=/models/torch
 
+# libpython3.10 is not optional here, despite looking like it. pyannote 4.x
+# decodes audio through torchcodec, whose FFmpeg backend dlopens
+# libpython3.10.so.1.0 — a file this base image does not ship. Without it
+# torchcodec fails to load, pyannote cannot read the audio, and the worker
+# returns transcripts with no speaker labels. It fails as a warning at import
+# time rather than an error, so it is easy to miss until diarization is
+# silently gone.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.10 python3-pip ffmpeg libsndfile1 ca-certificates \
+        python3.10 python3-pip libpython3.10 ffmpeg libsndfile1 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3.10 /usr/bin/python
 

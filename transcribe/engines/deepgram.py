@@ -3,14 +3,20 @@
 Cheapest of the good options (~$0.26/hour, diarization included) and a single
 synchronous POST with the audio as the raw body.
 
-The one thing that matters here is the diarization parameter. `diarize=true` is
-marked deprecated in favour of `diarize_model`, and on a v2-only deployment it
-can return a cheerful 200 with no speaker labels at all — a silent data loss,
-not an error. Sources disagree on whether `diarize_model` merely *selects* the
-diarizer or also *enables* it, and getting that wrong costs every speaker label
-in the app, so we send both and then check the result: if diarization was asked
-for and not a single word came back with a speaker, we say so in the job log
-rather than quietly presenting a one-speaker transcript.
+The one thing that matters here is the diarization parameter, and it has a trap
+at both ends:
+
+  * `diarize=true` is deprecated. It still returns 200 on batch, but always
+    routes to the *v1* diarizer, so code copied from a 2025 tutorial quietly
+    gets materially worse speaker labels.
+  * `diarize_model` replaces it and, per Deepgram's docs, "both enables
+    diarization and selects the model version" — it is not merely a selector.
+  * Setting **both** is rejected outright: "requests that set both are
+    rejected". So the tempting belt-and-braces approach 400s every request.
+
+So: `diarize_model=latest` alone. We also check the result — if not a single
+word comes back with a speaker we say so in the job log, rather than quietly
+presenting a one-speaker transcript.
 """
 
 from __future__ import annotations
@@ -41,8 +47,8 @@ class Deepgram(Engine):
 
         params = {
             "model": MODEL,
-            # Both, deliberately — see the module docstring.
-            "diarize": "true",
+            # diarize_model alone: it enables diarization as well as selecting
+            # v2, and sending the deprecated `diarize` alongside it is rejected.
             "diarize_model": "latest",
             "punctuate": "true",
             "smart_format": "true",

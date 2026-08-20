@@ -171,7 +171,7 @@ def normalize_speaker(value) -> Optional[str]:
     """Turn whatever an engine calls a speaker into a short stable label."""
     if value is None:
         return None
-    s = str(value).strip()
+    s = str(value).strip().rstrip(":").strip()
     if not s:
         return None
     if s.upper().startswith("SPEAKER_"):

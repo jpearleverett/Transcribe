@@ -31,6 +31,14 @@ cd Transcribe
 Then open **http://127.0.0.1:8756/** in Chrome, tap the settings gear, and add
 an API key for one of the engines below.
 
+If anything misbehaves, run the setup check first — it names the problem and
+the exact command that fixes it:
+
+```bash
+./run.sh --check              # environment, engines, storage, self-test
+./run.sh --check --network    # also proves your API keys actually work
+```
+
 The base install needs nothing but `python` and `ffmpeg` — the server is pure
 standard library, so there is no pip step to fail on a phone.
 
@@ -233,6 +241,7 @@ holds under ±0.8 s of boundary jitter at 6.1%.
 ```
 transcribe/          the server
   align.py           word→speaker attribution and segmentation
+  doctor.py          the --check setup diagnosis
   exporters.py       SRT / VTT / TXT / MD / CSV / JSON
   server.py          HTTP, SSE, Range requests — stdlib only
   jobs.py            job store, worker thread, crash recovery
@@ -243,7 +252,7 @@ transcribe/          the server
 web/                 the front end (no build step, no framework)
 gpu/                 the RunPod GPU worker
 tools/               diarize_sherpa.py — offline diarization helper
-tests/               146 tests, no network needed
+tests/               155 tests, no network needed
 ```
 
 Run the tests with `python3 -m unittest discover -s tests`.
@@ -251,6 +260,14 @@ Run the tests with `python3 -m unittest discover -s tests`.
 ---
 
 ## Troubleshooting
+
+**Start here:** `./run.sh --check`. It walks the whole setup — Python, ffmpeg
+and whether it has the Opus encoder, wake locks, disk space, config file
+permissions, every engine's readiness, the offline build, and an end-to-end
+self-test of the transcript pipeline — and prints the exact fix for anything
+wrong. Add `--network` and it verifies each API key against the provider and
+tells you, for example, that your RunPod key is fine but the endpoint ID does
+not exist on that account.
 
 **"Port 8756 is already in use"** — it is probably already running. Open
 http://127.0.0.1:8756/, or use `./run.sh --port 8757`.

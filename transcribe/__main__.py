@@ -13,11 +13,19 @@ def main(argv=None) -> int:
                     help="address to bind (default 127.0.0.1 — this device only)")
     ap.add_argument("--port", type=int, default=cfg["port"], help="port to listen on")
     ap.add_argument("--version", action="store_true", help="print the version and exit")
+    ap.add_argument("--check", action="store_true",
+                    help="check the setup and report exactly what needs fixing")
+    ap.add_argument("--network", action="store_true",
+                    help="with --check, also verify your API keys actually work")
     args = ap.parse_args(argv)
 
     if args.version:
         print(f"Transcribe {server.VERSION}")
         return 0
+
+    if args.check:
+        from . import doctor
+        return doctor.run(network=args.network)
 
     if args.port < 1024:
         print(f"Port {args.port} needs root on Android. Pick something above 1024.", file=sys.stderr)

@@ -5,6 +5,7 @@
 #   ./run.sh                 listen on 127.0.0.1:8756 (this phone only)
 #   ./run.sh --port 9000     use a different port
 #   ./run.sh --lan           also listen on the local network (prints a token)
+#   ./run.sh --check         diagnose the setup instead of starting
 #
 set -euo pipefail
 
@@ -15,6 +16,13 @@ PY="$(command -v python3 || command -v python)" || {
 HOST=127.0.0.1
 PORT="${TRANSCRIBE_PORT:-8756}"
 EXTRA=()
+
+# Diagnosis mode short-circuits everything else, including the wake lock.
+for arg in "$@"; do
+  if [ "$arg" = "--check" ]; then
+    cd "$HERE" && exec "$PY" -m transcribe "$@"
+  fi
+done
 
 while [ $# -gt 0 ]; do
   case "$1" in

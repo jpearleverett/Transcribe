@@ -150,6 +150,13 @@ class ElevenLabsTest(unittest.TestCase):
             base.get("elevenlabs").transcribe(make_ctx(num_speakers=3))
         self.assertEqual(p.calls[0]["fields"]["num_speakers"], "3")
 
+    def test_max_speakers_drives_num_speakers(self):
+        """ElevenLabs documents num_speakers as the maximum, not an exact count."""
+        set_key("elevenlabs")
+        with Patched(upload_multipart=self.FIXTURE) as p:
+            base.get("elevenlabs").transcribe(make_ctx(max_speakers=5))
+        self.assertEqual(p.calls[0]["fields"]["num_speakers"], "5")
+
     def test_empty_response_raises(self):
         set_key("elevenlabs")
         with Patched(upload_multipart={"words": [], "text": ""}):
@@ -192,17 +199,18 @@ class DeepgramTest(unittest.TestCase):
         },
     }
 
-    def test_sends_both_diarization_parameters(self):
+    def test_diarization_parameter_is_diarize_model_only(self):
         set_key("deepgram")
         with Patched(upload_raw=self.FIXTURE) as p:
             result = base.get("deepgram").transcribe(make_ctx())
         url = p.calls[0]["url"]
-        # Sources disagree on whether diarize_model enables diarization or only
-        # selects which one runs. Getting it wrong costs every speaker label, so
-        # send both: diarize=true to enable, diarize_model=latest to opt into v2
-        # rather than the old default.
-        self.assertIn("diarize=true", url)
+        # diarize_model both enables diarization and picks v2. The deprecated
+        # diarize=true would silently route to v1 — and, critically, Deepgram
+        # REJECTS any request that sets both, so sending them together as
+        # belt-and-braces 400s every single call.
         self.assertIn("diarize_model=latest", url)
+        self.assertNotIn("diarize=true", url)
+        self.assertNotIn("diarize=", url.replace("diarize_model=", ""))
         self.assertIn("model=nova-3", url)
         self.assertEqual(p.calls[0]["headers"]["Authorization"], "Token test-key")
         self.assertEqual([w.text for w in result.words], ["Hello", "there.", "Hi."],
@@ -281,6 +289,24 @@ class AssemblyAITest(unittest.TestCase):
         self.assertAlmostEqual(result.words[0].end, 0.4, msg="ms must become seconds")
         self.assertAlmostEqual(result.words[2].start, 1.2)
         self.assertEqual(result.model, "universal-3-5-pro")
+
+    def test_speaker_bounds_use_speaker_options(self):
+        """speakers_expected and speaker_options are mutually exclusive."""
+        set_key("assemblyai")
+        with Patched(upload_raw={"upload_url": "u"}, post={"id": "t"},
+                     get=self.COMPLETED) as p:
+            base.get("assemblyai").transcribe(make_ctx(min_speakers=2, max_speakers=4))
+        body = next(c for c in p.calls if c["fn"] == "post")["json_body"]
+        self.assertEqual(body["speaker_options"],
+                         {"min_speakers_expected": 2, "max_speakers_expected": 4})
+        self.assertNotIn("speakers_expected", body)
+
+        with Patched(upload_raw={"upload_url": "u"}, post={"id": "t"},
+                     get=self.COMPLETED) as p:
+            base.get("assemblyai").transcribe(make_ctx(num_speakers=3, max_speakers=4))
+        body = next(c for c in p.calls if c["fn"] == "post")["json_body"]
+        self.assertEqual(body["speakers_expected"], 3)
+        self.assertNotIn("speaker_options", body)
 
     def test_polls_until_completed(self):
         set_key("assemblyai")
@@ -571,6 +597,8 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(base.normalize_speaker("SPEAKER_07"), "7")
         self.assertEqual(base.normalize_speaker(0), "0")
         self.assertEqual(base.normalize_speaker("A"), "A")
+        self.assertEqual(base.normalize_speaker("A:"), "A", "some providers append a colon")
+        self.assertEqual(base.normalize_speaker("agent:"), "agent")
         self.assertIsNone(base.normalize_speaker(None))
         self.assertIsNone(base.normalize_speaker("  "))
 

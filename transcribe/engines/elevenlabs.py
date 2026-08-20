@@ -38,8 +38,11 @@ class ElevenLabs(Engine):
         }
         if ctx.language and ctx.language != "auto":
             fields["language_code"] = ctx.language
-        if ctx.num_speakers:
-            fields["num_speakers"] = str(ctx.num_speakers)
+        # Documented as "the maximum amount of speakers", so an explicit
+        # maximum is the right thing to send when no exact count is known.
+        speakers = ctx.num_speakers or ctx.max_speakers
+        if speakers:
+            fields["num_speakers"] = str(speakers)
 
         ctx.log(f"Sending to ElevenLabs ({MODEL})")
         ctx.progress("uploading", 0.05)

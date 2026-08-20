@@ -64,6 +64,14 @@ class AssemblyAI(Engine):
             body["language_detection"] = True
         if ctx.num_speakers:
             body["speakers_expected"] = ctx.num_speakers
+        elif ctx.min_speakers or ctx.max_speakers:
+            # speakers_expected and speaker_options are mutually exclusive.
+            opts = {}
+            if ctx.min_speakers:
+                opts["min_speakers_expected"] = ctx.min_speakers
+            if ctx.max_speakers:
+                opts["max_speakers_expected"] = ctx.max_speakers
+            body["speaker_options"] = opts
 
         ctx.check_cancel()
         ctx.progress("transcribing", 0.55)

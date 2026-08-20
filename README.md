@@ -47,6 +47,7 @@ standard library, so there is no pip step to fail on a phone.
 | **OpenAI** | ~2 min | segments only | ~$0.36/hr | yes |
 | **On this phone** | 20-45 min | yes | free | **no** |
 
+
 **If you have the RunPod pod set up, use it.** It is the most accurate option
 and the audio only ever touches infrastructure you control. See
 [`gpu/README.md`](gpu/README.md) for the deploy steps — it is a Docker build,
@@ -114,7 +115,7 @@ Keep the phone plugged in for anything long, particularly on the offline engine.
 
 ```bash
 ./install.sh --local            # ~15-40 min: compiles from source
-./install.sh --local --model=small.en-q5_1   # smaller and much faster
+./install.sh --local --model=large-v3-turbo-q5_0   # bigger, better, ~3x slower
 ```
 
 This builds **whisper.cpp** for transcription and **sherpa-onnx** for speaker
@@ -123,13 +124,19 @@ leaves the phone.
 
 Honest expectations for one hour of audio on a modern phone:
 
-| Model | Size | Transcription time | Quality |
-|---|---|---|---|
-| `large-v3-turbo-q5_0` (default) | 574 MB | 35-60 min | best |
-| `small.en-q5_1` | 190 MB | 12-25 min | good, English only |
-| `base.en-q5_1` | 60 MB | 5-8 min | rough |
+| Model | Size | Peak RAM | Transcription time | Quality |
+|---|---|---|---|---|
+| `small.en-q5_1` (default) | 190 MB | ~600 MB | 12-25 min | good, **English only** |
+| `large-v3-turbo-q5_0` | 574 MB | ~1.2 GB | 35-60 min | best, multilingual |
+| `base.en-q5_1` | 60 MB | ~400 MB | 5-8 min | rough |
 
 Diarization adds another 6-18 minutes on top.
+
+The default is the small model deliberately. Peak RAM, not file size, is what
+gets a Termux process silently killed by Android, and `large-v3-turbo` wants
+about 1.2 GB resident for the whole run. Move up to it if you need other
+languages or the extra accuracy, ideally with the phone plugged in and
+everything else closed.
 
 Two things worth knowing, because the obvious approach does not work:
 

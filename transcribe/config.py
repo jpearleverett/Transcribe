@@ -32,7 +32,7 @@ DEFAULTS = {
     "keep_audio": True,          # keep uploads so the player can seek
     "max_upload_mb": 2048,
     # Local engine settings
-    "local_model": "ggml-large-v3-turbo-q5_0.bin",
+    "local_model": "ggml-small.en-q5_1.bin",
     "local_threads": 0,          # 0 = auto-detect
     "local_diarize": True,
     # RunPod serverless

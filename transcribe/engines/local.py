@@ -43,7 +43,7 @@ class Local(Engine):
     speed_factor = 2.0     # roughly: an hour of audio takes half an hour
     config_fields = [
         {"key": "local_model", "label": "Model file",
-         "placeholder": "ggml-large-v3-turbo-q5_0.bin",
+         "placeholder": "ggml-small.en-q5_1.bin",
          "help": "A file in ~/.transcribe/models. Smaller models are much faster and less accurate."},
         {"key": "local_threads", "label": "Threads (0 = auto)", "type": "number",
          "help": "Fewer threads run cooler and slower; a hot phone throttles anyway."},
@@ -68,7 +68,7 @@ class Local(Engine):
     def model_path(self) -> Path:
         from .. import config
         cfg = config.load()
-        name = cfg.get("local_model") or "ggml-large-v3-turbo-q5_0.bin"
+        name = cfg.get("local_model") or "ggml-small.en-q5_1.bin"
         p = config.MODEL_DIR / name
         if p.exists():
             return p

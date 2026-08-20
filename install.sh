@@ -18,7 +18,7 @@ MODEL_DIR="$HOME_DIR/models"
 BIN_DIR="$HOME_DIR/bin"
 BUILD_DIR="$HOME_DIR/build"
 
-WHISPER_MODEL="${WHISPER_MODEL:-large-v3-turbo-q5_0}"
+WHISPER_MODEL="${WHISPER_MODEL:-small.en-q5_1}"
 DO_LOCAL=0
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
@@ -145,15 +145,21 @@ else
   fi
   cd whisper.cpp
   info "configuring (this is the slow part)"
-  # GGML_OPENMP=OFF is mandatory: Termux has no libomp, and the build fails
-  # confusingly at link time without this.
+  # GGML_OPENMP=OFF is mandatory: Termux has no libomp and the build fails
+  # confusingly at link time otherwise. GGML_NATIVE=OFF because it means
+  # -march=native, which misdetects under Android's clang; we name the ARM
+  # baseline explicitly instead.
   cmake -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DGGML_OPENMP=OFF \
-    -DGGML_NATIVE=ON \
+    -DGGML_NATIVE=OFF \
+    -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16 \
     -DWHISPER_BUILD_TESTS=OFF \
     -DWHISPER_BUILD_SERVER=OFF \
-    >/dev/null 2>&1 || die "cmake configure failed for whisper.cpp"
+    >/dev/null 2>&1 \
+    || cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_NATIVE=OFF \
+         -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF >/dev/null 2>&1 \
+    || die "cmake configure failed for whisper.cpp"
   info "compiling with $(nproc) cores"
   cmake --build build --config Release -j "$(nproc)" >/dev/null 2>&1 \
     || die "whisper.cpp build failed. Try: cd $BUILD_DIR/whisper.cpp && cmake --build build -j2"
@@ -172,7 +178,9 @@ if [ -s "$MODEL_FILE" ]; then
 else
   URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$WHISPER_MODEL.bin"
   info "fetching ggml-$WHISPER_MODEL.bin"
-  info "(large-v3-turbo-q5_0 is 574 MB; pass --model=small.en-q5_1 for a 190 MB, much faster one)"
+  info "(small.en-q5_1 is 190 MB and English-only. For other languages or the"
+  info " best accuracy: ./install.sh --local --model=large-v3-turbo-q5_0 — 574 MB,"
+  info " and about 3x slower.)"
   curl -fL --progress-bar "$URL" -o "$MODEL_FILE.part" \
     || die "download failed. Check the model name at https://huggingface.co/ggerganov/whisper.cpp"
   mv "$MODEL_FILE.part" "$MODEL_FILE"
@@ -187,12 +195,26 @@ else
   # Without these two variables sherpa-onnx downloads Microsoft's glibc-linked
   # onnxruntime, which cannot load under Android's Bionic libc. Pointing them at
   # Termux's own onnxruntime package is the whole trick.
-  export SHERPA_ONNXRUNTIME_INCLUDE_DIR="$PREFIX/include"
-  export SHERPA_ONNXRUNTIME_LIB_DIR="$PREFIX/lib"
-  if [ ! -f "$PREFIX/include/onnxruntime_cxx_api.h" ]; then
-    warn "onnxruntime headers not found in \$PREFIX/include."
-    warn "Run: pkg install onnxruntime  — then re-run ./install.sh --local"
+  # The header lands in one of two places depending on the package version,
+  # and sherpa-onnx's fallback search only looks in /usr/include, which does
+  # not exist in Termux. Find it rather than guessing.
+  ORT_INC=""
+  for d in "$PREFIX/include" "$PREFIX/include/onnxruntime" \
+           "$PREFIX/include/onnxruntime/core/session"; do
+    [ -f "$d/onnxruntime_cxx_api.h" ] && ORT_INC="$d" && break
+  done
+  if [ -z "$ORT_INC" ]; then
+    ORT_INC="$(find "$PREFIX/include" -name onnxruntime_cxx_api.h -print -quit 2>/dev/null | xargs -r dirname)"
   fi
+  if [ -z "$ORT_INC" ]; then
+    warn "onnxruntime headers not found under \$PREFIX/include."
+    warn "Run: pkg install onnxruntime  — then re-run ./install.sh --local"
+    ORT_INC="$PREFIX/include"
+  else
+    info "onnxruntime headers: $ORT_INC"
+  fi
+  export SHERPA_ONNXRUNTIME_INCLUDE_DIR="$ORT_INC"
+  export SHERPA_ONNXRUNTIME_LIB_DIR="$PREFIX/lib"
   cd "$BUILD_DIR"
   if [ -d sherpa-onnx/.git ]; then
     info "updating existing checkout"
@@ -204,6 +226,9 @@ else
   fi
   cd sherpa-onnx
   info "compiling the Python bindings (15-30 minutes — go make tea)"
+  export CMAKE_ARGS="-DSHERPA_ONNX_ENABLE_SPEAKER_DIARIZATION=ON \
+    -DSHERPA_ONNX_ENABLE_PORTAUDIO=OFF -DSHERPA_ONNX_ENABLE_WEBSOCKET=OFF \
+    -DSHERPA_ONNX_ENABLE_TTS=OFF -DSHERPA_ONNX_ENABLE_BINARY=OFF"
   "$PY" -m pip install --no-build-isolation . 2>&1 | tail -3 \
     || warn "sherpa-onnx build failed — the app will still work, just without speaker labels on the offline engine"
 fi
@@ -258,7 +283,7 @@ $(bold "Offline engine ready.")
   Pick "On this phone (offline)" as the engine.
 
   Honest expectations for a 1-hour recording on a phone:
-    transcription   20-40 minutes
+    transcription   12-25 minutes  (small.en-q5_1)
     diarization      6-18 minutes
 
   Keep the phone plugged in, and see the README's "Keeping it alive" section —

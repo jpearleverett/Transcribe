@@ -53,6 +53,11 @@ class Handler(BaseHTTPRequestHandler):
         # The page only ever talks to its own origin; deny the rest.
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        if self.close_connection:
+            # Setting close_connection alone drops the socket without telling
+            # the client why; say so explicitly so the browser reconnects
+            # cleanly instead of reporting a network error.
+            self.send_header("Connection", "close")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -69,11 +74,23 @@ class Handler(BaseHTTPRequestHandler):
     def fail(self, message: str, status: int = 400):
         self.json({"error": message}, status)
 
+    def fail_unread(self, message: str, status: int = 400):
+        """Reject a request whose body we have not consumed.
+
+        With HTTP/1.1 keep-alive, leaving unread bytes in the socket makes the
+        next request parse the tail of this one's body as a request line — the
+        connection silently corrupts rather than failing cleanly. Closing it is
+        the only correct move.
+        """
+        self.close_connection = True
+        self.json({"error": message}, status)
+
     def read_json(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:
             return {}
         if length > 8 * 1024 * 1024:
+            self.close_connection = True
             raise ValueError("request body too large")
         raw = self.rfile.read(length)
         try:
@@ -116,7 +133,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
 
         if not self.authorized():
-            return self.fail("Not authorised. Open the link printed by the server, including its ?token=.", 401)
+            return self.fail_unread(
+                "Not authorised. Open the link printed by the server, including its ?token=.", 401)
 
         try:
             if path == "/" or path == "/index.html":
@@ -193,18 +211,19 @@ class Handler(BaseHTTPRequestHandler):
             return self.fail("No audio was sent.")
         max_bytes = config.load()["max_upload_mb"] * 1024 * 1024
         if length > max_bytes:
-            return self.fail(f"That file is larger than the {config.load()['max_upload_mb']} MB limit.")
+            return self.fail_unread(
+                f"That file is larger than the {config.load()['max_upload_mb']} MB limit.")
 
         engine_name = q.get("engine") or config.load()["engine"]
         try:
             engine = engines.get(engine_name)
         except engines.EngineError as e:
-            return self.fail(str(e))
+            return self.fail_unread(str(e))
         ok, reason = engine.available()
         if not ok:
-            return self.fail(reason or f"{engine.label} is not available.")
+            return self.fail_unread(reason or f"{engine.label} is not available.")
         if engine.needs_key and not engine.has_key():
-            return self.fail(f"{engine.label} needs an API key. Add one in Settings.")
+            return self.fail_unread(f"{engine.label} needs an API key. Add one in Settings.")
 
         config.ensure_dirs()
         safe = _safe_filename(name)
@@ -224,12 +243,12 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError) as e:
             dest.unlink(missing_ok=True)
             if isinstance(e, OSError) and getattr(e, "errno", None) == 28:
-                return self.fail("The phone is out of storage space.", 507)
-            return self.fail("The upload was interrupted.", 400)
+                return self.fail_unread("The phone is out of storage space.", 507)
+            return self.fail_unread("The upload was interrupted.", 400)
 
         if written < length:
             dest.unlink(missing_ok=True)
-            return self.fail("The upload ended early — try again.", 400)
+            return self.fail_unread("The upload ended early — try again.", 400)
 
         store = jobs_mod.store()
         job = store.create(

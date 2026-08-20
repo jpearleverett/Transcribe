@@ -125,13 +125,17 @@ def assign_speakers(
         while cursor < len(turns) and turns[cursor].end < w.start:
             cursor += 1
 
-        best_spk, best_ov = None, 0.0
+        # Sum overlap per speaker rather than taking the single best turn: a
+        # speaker with two short turns touching one word should beat a speaker
+        # with one slightly longer one.
+        totals: dict = {}
         j = cursor
         while j < len(turns) and turns[j].start < w.end:
             ov = _overlap(w.start, w.end, turns[j].start, turns[j].end)
-            if ov > best_ov:
-                best_ov, best_spk = ov, turns[j].speaker
+            if ov > 0:
+                totals[turns[j].speaker] = totals.get(turns[j].speaker, 0.0) + ov
             j += 1
+        best_spk = max(totals, key=totals.get) if totals else None
 
         if best_spk is None:
             # No overlap at all -> nearest turn by distance from the word centre.
@@ -210,6 +214,95 @@ def smooth_speakers(
                     merged.append(r)
             runs = merged
     return words
+
+
+def smooth_sentences(
+    words: list,
+    *,
+    majority: float = 0.6,
+    max_sentence_dur: float = 15.0,
+    protect_run_dur: float = 1.5,
+) -> list:
+    """Snap a sentence to its dominant speaker.
+
+    Real speaker changes almost never happen mid-sentence, so when one speaker
+    holds most of a sentence the stragglers are usually boundary errors from the
+    diarizer. This is the single most effective correction available after
+    per-word overlap assignment.
+
+    It is applied conservatively, because the premise fails in three ways:
+
+      * A long "sentence" is usually one the ASR failed to punctuate, and those
+        genuinely do span turns — hence `max_sentence_dur`.
+      * A substantial contiguous stretch by the minority speaker is a real turn
+        that happens to lack punctuation around it — hence `protect_run_dur`.
+      * A minority run at the *start or end* of a sentence is ambiguous: it is
+        just as likely to be a real turn change that the punctuation lags by a
+        word as it is to be an error. We only correct runs strictly interior to
+        the sentence, where no plausible turn structure explains a speaker
+        leaving and the same speaker immediately resuming. Edge runs keep
+        whatever the per-word overlap decided, which is the best local evidence
+        we have without reading across sentences.
+    """
+    if len(words) < 2:
+        return words
+
+    for start, end in _sentence_spans(words):
+        span = words[start:end]
+        if len(span) < 2:
+            continue
+        duration = span[-1].end - span[0].start
+        if duration > max_sentence_dur:
+            continue
+
+        totals: dict = {}
+        for w in span:
+            if w.speaker is not None:
+                totals[w.speaker] = totals.get(w.speaker, 0.0) + w.dur
+        if len(totals) < 2:
+            continue
+
+        total = sum(totals.values()) or 1.0
+        winner = max(totals, key=totals.get)
+        if totals[winner] / total < majority:
+            continue
+
+        for run_start, run_end in _minority_runs(span, winner):
+            # Edge runs are ambiguous; see the docstring.
+            if run_start == 0 or run_end == len(span):
+                continue
+            if sum(w.dur for w in span[run_start:run_end]) >= protect_run_dur:
+                continue
+            for w in span[run_start:run_end]:
+                w.speaker = winner
+    return words
+
+
+def _sentence_spans(words: list) -> list:
+    """Index ranges delimited by sentence-ending punctuation."""
+    spans, start = [], 0
+    for i, w in enumerate(words):
+        if SENTENCE_END.search(w.text):
+            spans.append((start, i + 1))
+            start = i + 1
+    if start < len(words):
+        spans.append((start, len(words)))
+    return spans
+
+
+def _minority_runs(span: list, winner) -> list:
+    """Index ranges of contiguous words not belonging to `winner`."""
+    runs, start = [], None
+    for i, w in enumerate(span):
+        if w.speaker != winner:
+            if start is None:
+                start = i
+        elif start is not None:
+            runs.append((start, i))
+            start = None
+    if start is not None:
+        runs.append((start, len(span)))
+    return runs
 
 
 # --------------------------------------------------------------------------
@@ -316,6 +409,13 @@ def diarize_transcript(
         min_run_words=opts.get("min_run_words", 2),
         min_run_dur=opts.get("min_run_dur", 0.40),
     )
+    if opts.get("sentence_smoothing", True):
+        words = smooth_sentences(
+            words,
+            majority=opts.get("sentence_majority", 0.6),
+            max_sentence_dur=opts.get("max_sentence_dur", 15.0),
+            protect_run_dur=opts.get("protect_run_dur", 1.5),
+        )
     return build_segments(
         words,
         max_gap=opts.get("max_gap", 1.0),

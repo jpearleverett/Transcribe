@@ -343,6 +343,28 @@ class ServerTest(unittest.TestCase):
         self.req("/api/config", "POST", json.dumps({"max_dur": 30}).encode(),
                  {"Content-Type": "application/json"})
 
+    def test_18b_oversized_upload_closes_connection(self):
+        """An oversized upload must be rejected AND the connection closed.
+
+        Leaving the unread body in a keep-alive socket makes the next request
+        parse this one's audio as a request line.
+        """
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=20)
+        cfg = self.req("/api/config")["config"]
+        too_big = cfg["max_upload_mb"] * 1024 * 1024 + 1
+        conn.putrequest("POST", "/api/upload?" + urllib.parse.urlencode(
+            {"name": "huge.wav", "engine": "mock"}))
+        conn.putheader("Content-Type", "audio/wav")
+        conn.putheader("Content-Length", str(too_big))
+        conn.endheaders()
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 400)
+        self.assertIn("larger than", json.loads(resp.read())["error"])
+        self.assertEqual(resp.getheader("Connection"), "close",
+                         "server must close a connection whose body it did not read")
+        conn.close()
+
     def test_19_health(self):
         data = self.req("/api/health")
         self.assertTrue(data["ok"])

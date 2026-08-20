@@ -171,23 +171,38 @@ Tap a speaker chip to rename them; the name flows through to every export.
 ```
 upload → probe duration → convert/compress (ffmpeg)
        → engine (words + speaker turns)
-       → assign each WORD a speaker by temporal overlap
-       → smooth away implausible one-word flips
-       → group into readable segments
+       → 1. assign each WORD a speaker by temporal overlap
+       → 2. absorb implausible one-word flips
+       → 3. snap sentences to their dominant speaker
+       → 4. group into readable segments
        → save to disk
 ```
 
-The interesting part is the third step. Most tools assign a whole ASR *segment*
-to whichever speaker covers most of it, which loses every short interjection and
-smears boundaries by seconds. Instead, each word is attributed independently by
-how much it overlaps each speaker turn; a word straddling a boundary goes to
-whichever side holds more of it. Then a smoothing pass absorbs runs that are
-both very short in time and very short in words — those are nearly always
-boundary errors, whereas a genuine one-word turn ("Exactly.") is longer than the
-threshold and survives.
+Steps 1-3 are where the accuracy lives.
+
+**Why not just use the engine's segments?** Most tools assign a whole ASR
+segment to whichever speaker covers most of it. Whisper-style segments are ~30 s
+blocks whose boundaries are decoder artifacts, not acoustic ones, so this loses
+every short interjection and smears turn boundaries by seconds.
+
+**1. Per-word overlap.** Each word is attributed independently by summing how
+much it overlaps each speaker's turns and taking the winner. A word straddling a
+boundary goes to whichever side holds more of it. Words landing in a diarizer's
+gap fall back to the nearest turn.
+
+**2. Run-length smoothing.** A run that is short in *both* time and word count,
+with the same speaker on both sides, is absorbed. A genuine one-word turn
+("Exactly.") is longer than the threshold and survives.
+
+**3. Sentence-scoped majority vote.** Within each `.?!`-delimited sentence, if
+one speaker holds 60% of the talk time, stray words are snapped to them — real
+speaker changes almost never happen mid-sentence. This is applied conservatively,
+skipping long unpunctuated runs (which genuinely do span turns), minority
+stretches over 1.5 s (real turns), and runs at a sentence's *edge* (ambiguous:
+just as likely a real turn the punctuation lags by a word).
 
 See [`transcribe/align.py`](transcribe/align.py). It is the part most worth
-reading, and it is covered by tests in `tests/test_align.py`.
+reading, and `tests/test_align.py` covers each of these cases.
 
 ---
 
@@ -206,7 +221,7 @@ transcribe/          the server
 web/                 the front end (no build step, no framework)
 gpu/                 the RunPod GPU worker
 tools/               diarize_sherpa.py — offline diarization helper
-tests/               82 tests, no network needed
+tests/               97 tests, no network needed
 ```
 
 Run the tests with `python3 -m unittest discover -s tests`.

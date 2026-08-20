@@ -5,8 +5,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from transcribe.align import (
-    Word, Turn, assign_speakers, smooth_speakers, build_segments,
-    diarize_transcript, merge_adjacent, speaker_stats, _join_words,
+    Word, Turn, assign_speakers, smooth_speakers, smooth_sentences, build_segments,
+    diarize_transcript, merge_adjacent, speaker_stats, _join_words, _sentence_spans, _minority_runs,
 )
 
 
@@ -119,6 +119,114 @@ class TestSmooth(unittest.TestCase):
         ]
         smooth_speakers(words)
         self.assertEqual(set(w.speaker for w in words), {"A"})
+
+
+class TestSentenceSmoothing(unittest.TestCase):
+    def test_straddle_error_snapped_to_dominant_speaker(self):
+        # "I think that is right." — one word wrongly given to B mid-sentence.
+        words = [
+            W(0.0, 0.4, "I", "A"), W(0.4, 0.9, "think", "A"),
+            W(0.9, 1.2, "that", "B"),
+            W(1.2, 1.6, "is", "A"), W(1.6, 2.2, "right.", "A"),
+        ]
+        smooth_sentences(words)
+        self.assertEqual([w.speaker for w in words], ["A"] * 5)
+
+    def test_real_interjection_is_protected(self):
+        # B holds the floor for 1.8s: a real turn, even without punctuation.
+        words = [
+            W(0.0, 0.4, "I", "A"), W(0.4, 0.9, "think", "A"),
+            W(1.0, 2.8, "absolutely", "B"),
+            W(2.9, 3.3, "yes.", "A"),
+        ]
+        smooth_sentences(words)
+        self.assertEqual(words[2].speaker, "B")
+
+    def test_long_unpunctuated_run_left_alone(self):
+        # A 20s "sentence" is unpunctuated ASR output, not one utterance.
+        words = [W(i * 1.0, i * 1.0 + 0.8, f"w{i}", "A") for i in range(18)]
+        words.append(W(18.0, 18.8, "no.", "B"))
+        smooth_sentences(words)
+        self.assertEqual(words[-1].speaker, "B")
+
+    def test_no_majority_leaves_split_alone(self):
+        words = [
+            W(0.0, 1.0, "one", "A"), W(1.0, 1.4, "two", "B"), W(1.4, 2.4, "three", "A"),
+            W(2.4, 3.4, "four", "B"), W(3.4, 4.4, "five.", "B"),
+        ]
+        before = [w.speaker for w in words]
+        smooth_sentences(words)
+        self.assertEqual([w.speaker for w in words], before,
+                         "no speaker holds a 60% majority, so nothing moves")
+
+    def test_single_speaker_sentence_untouched(self):
+        words = [W(0.0, 0.5, "Hello", "A"), W(0.5, 1.0, "there.", "A")]
+        smooth_sentences(words)
+        self.assertEqual([w.speaker for w in words], ["A", "A"])
+
+    def test_each_sentence_scored_independently(self):
+        words = [
+            W(0.0, 0.4, "I", "A"), W(0.4, 0.9, "agree", "B"), W(0.9, 1.4, "entirely.", "A"),
+            W(2.0, 2.4, "No", "B"), W(2.4, 2.9, "you", "B"), W(2.9, 3.4, "don't.", "A"),
+        ]
+        smooth_sentences(words)
+        # Interior flip corrected...
+        self.assertEqual([w.speaker for w in words[:3]], ["A", "A", "A"])
+        # ...trailing one left alone: it may be a real turn the punctuation lags.
+        self.assertEqual([w.speaker for w in words[3:]], ["B", "B", "A"])
+
+    def test_leading_minority_run_left_alone(self):
+        words = [W(0.0, 1.0, "one", "A"), W(1.0, 2.0, "two", "B"), W(2.0, 3.0, "three.", "B")]
+        smooth_sentences(words)
+        self.assertEqual([w.speaker for w in words], ["A", "B", "B"])
+
+    def test_minority_runs_indexing(self):
+        span = [W(0, 1, "a", "A"), W(1, 2, "b", "B"), W(2, 3, "c", "B"), W(3, 4, "d", "A")]
+        self.assertEqual(_minority_runs(span, "A"), [(1, 3)])
+        self.assertEqual(_minority_runs(span, "B"), [(0, 1), (3, 4)])
+
+    def test_multiple_interior_runs_all_corrected(self):
+        words = [
+            W(0.0, 0.6, "a", "A"), W(0.6, 0.9, "b", "B"), W(0.9, 1.5, "c", "A"),
+            W(1.5, 1.8, "d", "B"), W(1.8, 2.6, "e.", "A"),
+        ]
+        smooth_sentences(words)
+        self.assertEqual([w.speaker for w in words], ["A"] * 5)
+
+    def test_sentence_spans(self):
+        words = [W(0, 0.1, "a"), W(0.1, 0.2, "b."), W(0.2, 0.3, "c"), W(0.3, 0.4, "d?")]
+        self.assertEqual(_sentence_spans(words), [(0, 2), (2, 4)])
+
+    def test_trailing_words_without_punctuation_form_a_span(self):
+        words = [W(0, 0.1, "a."), W(0.1, 0.2, "b")]
+        self.assertEqual(_sentence_spans(words), [(0, 1), (1, 2)])
+
+    def test_short_lists_safe(self):
+        self.assertEqual(smooth_sentences([]), [])
+        self.assertEqual(len(smooth_sentences([W(0, 1, "hi.", "A")])), 1)
+
+    def test_pipeline_can_disable_it(self):
+        # 0.7s is long enough to survive the run-length smoother, so this
+        # isolates the sentence pass.
+        def make():
+            return [
+                W(0.0, 0.4, "I", "A"), W(0.4, 0.9, "think", "A"),
+                W(0.9, 1.6, "that", "B"),
+                W(1.6, 2.0, "is", "A"), W(2.0, 2.6, "right.", "A"),
+            ]
+        on = diarize_transcript(make(), None)
+        self.assertEqual(len(on), 1, "sentence smoothing should heal the straddle")
+        off = diarize_transcript(make(), None, sentence_smoothing=False)
+        self.assertEqual(len(off), 3, "without it, the flip splits the turn three ways")
+
+
+class TestOverlapSummation(unittest.TestCase):
+    def test_two_short_turns_beat_one_longer(self):
+        # A holds 0.2 + 0.2 = 0.4s of the word; B holds 0.3s in one turn.
+        words = [W(1.0, 2.0, "word")]
+        turns = [Turn(1.0, 1.2, "A"), Turn(1.2, 1.5, "B"), Turn(1.5, 1.7, "A")]
+        assign_speakers(words, turns)
+        self.assertEqual(words[0].speaker, "A")
 
 
 class TestSegments(unittest.TestCase):

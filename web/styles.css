@@ -39,6 +39,13 @@
 
 * { box-sizing: border-box; }
 
+/* The `hidden` attribute is styled by the UA stylesheet, so ANY author rule
+   setting `display` outranks it and the element stays visible. Several
+   components here set display (.menu, .player, .toolbar, .icon-btn), so
+   without this the menus render permanently open and the player never hides.
+   This is the standard remedy and has to come before those rules. */
+[hidden] { display: none !important; }
+
 html { -webkit-text-size-adjust: 100%; }
 
 body {

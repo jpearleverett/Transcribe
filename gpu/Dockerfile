@@ -1,7 +1,10 @@
-# CUDA 12.4 + cuDNN 9 runtime: CTranslate2 4.x links against cuDNN 9, and a
-# mismatched pairing fails at load time with an unhelpful "cannot open shared
-# object file" rather than anything that names the real problem.
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+# CUDA 12.6 + cuDNN 9 runtime. Two constraints pin this:
+#   * CTranslate2 4.x links against cuDNN 9, and a mismatched pairing fails at
+#     load time with an unhelpful "cannot open shared object file".
+#   * pyannote.audio 4.x requires torch >= 2.8, and PyTorch's cu124 index stops
+#     at torch 2.6 — so CUDA 12.4 cannot satisfy the diarizer at all. cu126 is
+#     the earliest index carrying 2.8.
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -18,8 +21,13 @@ WORKDIR /app
 
 # Torch first and explicitly: pyannote would otherwise pull whatever CUDA build
 # pip happens to resolve, which is frequently the wrong one for this base image.
-RUN pip install --no-cache-dir torch==2.8.0 torchaudio==2.8.0 \
-        --index-url https://download.pytorch.org/whl/cu124
+# torchcodec is pinned alongside because pyannote only asks for >=0.7.0, and the
+# latest release expects a much newer torch — letting pip pick would drag the
+# whole CUDA stack out from under this image.
+RUN pip install --no-cache-dir \
+        torch==2.8.0 torchaudio==2.8.0 \
+        --index-url https://download.pytorch.org/whl/cu126 \
+    && pip install --no-cache-dir torchcodec==0.7.0
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -38,8 +46,16 @@ ARG DIARIZER_MODEL=pyannote/speaker-diarization-community-1
 ENV WHISPER_MODEL=${WHISPER_MODEL} \
     DIARIZER_MODEL=${DIARIZER_MODEL}
 
+# SKIP_PREFETCH=1 builds the image without baking in the weights. Useful for
+# validating the build quickly, or if you would rather the worker download them
+# on first use (slower first request, smaller image).
+ARG SKIP_PREFETCH=0
 COPY prefetch.py .
-RUN HF_TOKEN="${HF_TOKEN}" python prefetch.py
+RUN if [ "$SKIP_PREFETCH" = "1" ]; then \
+        echo "[build] skipping model prefetch"; \
+    else \
+        HF_TOKEN="${HF_TOKEN}" python prefetch.py; \
+    fi
 
 COPY handler.py .
 

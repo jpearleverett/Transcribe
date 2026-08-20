@@ -108,13 +108,13 @@ fi
 
 # ---------------------------------------------------------------- local
 
+[ "$IS_TERMUX" = "1" ] || die "--local is only supported on Termux (it builds native ARM64 binaries)."
+
 bold ""
 bold "Offline engine — this compiles from source and will take a while."
 info "Expect 15-40 minutes and about 2 GB of storage."
 info "Once built, a 1-hour recording takes roughly 20-45 minutes to process."
 echo
-
-[ "$IS_TERMUX" = "1" ] || die "--local is only supported on Termux."
 
 step "Installing build tools"
 for p in git cmake clang make binutils libopenblas onnxruntime python-onnxruntime python-numpy; do

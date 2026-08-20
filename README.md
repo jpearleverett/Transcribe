@@ -252,12 +252,22 @@ transcribe/          the server
 web/                 the front end (no build step, no framework)
 gpu/                 the RunPod GPU worker
 tools/               diarize_sherpa.py — offline diarization helper
-tests/               180 tests, no network needed
+tests/               199 tests, no network needed
 ```
 
 Run the tests with `python3 -m unittest discover -s tests`. They need no
-network and no API keys; the ones that exercise real ffmpeg conversions skip
-themselves if it isn't installed.
+network and no API keys. Two groups skip themselves when their tooling is
+absent: the ffmpeg conversion tests, and `tests/test_browser.py`, which drives
+the real app in Chromium on an emulated Pixel and needs Playwright:
+
+```bash
+pip install playwright && playwright install chromium
+python3 -m unittest tests.test_browser
+```
+
+That one earns its keep — it caught a CSS rule that overrode the `hidden`
+attribute and left both dropdown menus permanently open on screen, which no
+amount of server-side testing would have found.
 
 ---
 

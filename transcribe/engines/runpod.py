@@ -42,7 +42,7 @@ class RunPod(Engine):
     description = "Your own GPU worker: large-v3 + forced alignment + diarization. Fastest and most accurate."
     signup_url = "https://www.runpod.io/console/serverless"
     key_help = "Needs your RunPod API key and the endpoint ID of the worker deployed from this repo's gpu/ folder."
-    speed_factor = 1800.0     # ~30x realtime on a mid-range GPU
+    speed_factor = 30.0       # ~30x realtime on a mid-range GPU
     config_fields = [
         {"key": "runpod_endpoint", "label": "Endpoint ID",
          "placeholder": "e.g. 4kx9v2abcd1234",
@@ -91,18 +91,36 @@ class RunPod(Engine):
 
         audio_url = (cfg.get("runpod_audio_url") or "").strip()
         body_size = 0
+        temp_audio = None
         if audio_url:
             payload["audio_url"] = audio_url
             ctx.log(f"Pointing the worker at {audio_url}")
         else:
             budget = int(cfg.get("runpod_max_payload_mb") or RUNSYNC_LIMIT_MB)
             path, note = _fit_payload(ctx, min(budget, RUNSYNC_LIMIT_MB))
+            if path != ctx.source:
+                temp_audio = path
             if note:
                 ctx.log(note)
             ctx.progress("uploading", 0.1)
             payload["audio_base64"] = base64.b64encode(path.read_bytes()).decode("ascii")
             payload["audio_format"] = path.suffix.lstrip(".") or "opus"
             body_size = len(payload["audio_base64"])
+            # _fit_payload can only size the bitrate when the duration is known.
+            # If the probe failed it compresses at the default and we could still
+            # be over, so check the bytes we actually produced.
+            if body_size > RUNSYNC_LIMIT_MB * 1024 * 1024 * 0.97:
+                raise EngineError(
+                    f"This audio is {body_size / 1e6:.0f} MB once encoded, over RunPod's "
+                    f"{RUNSYNC_LIMIT_MB} MB request limit. Host it somewhere the worker can "
+                    "reach and set 'runpod_audio_url' in Settings, or use a cloud engine for "
+                    "this one — Deepgram and ElevenLabs take multi-gigabyte uploads.")
+
+        if temp_audio is not None:
+            try:
+                temp_audio.unlink(missing_ok=True)   # already base64'd into the payload
+            except OSError:
+                pass
 
         ctx.check_cancel()
         ctx.progress("uploading", 0.35)
@@ -119,7 +137,10 @@ class RunPod(Engine):
             ctx.log(f"Submitting to RunPod endpoint {endpoint}")
             url = f"{BASE}/{endpoint}/run"
 
-        submit = http.post(url, headers=headers, json_body=envelope, timeout=900, retries=1)
+        # retries=0: /run enqueues a job, so replaying it after a lost response
+        # starts (and bills for) a second GPU run. A failed submit is something
+        # the user retries explicitly.
+        submit = http.post(url, headers=headers, json_body=envelope, timeout=900, retries=0)
         if not isinstance(submit, dict):
             raise EngineError(f"RunPod did not accept the job: {str(submit)[:400]}")
 
@@ -147,18 +168,10 @@ class RunPod(Engine):
         # before any audio is even processed.
         budget = max(1800.0, (ctx.duration or 600.0) * 1.5)
         interval = 2.0
-        cancelled_remote = False
+        finished = False
 
         try:
             while True:
-                if ctx.cancelled() and not cancelled_remote:
-                    cancelled_remote = True
-                    try:
-                        http.post(f"{BASE}/{endpoint}/cancel/{job_id}", headers=headers,
-                                  json_body={}, timeout=30, retries=0)
-                        ctx.log("Asked RunPod to cancel the job")
-                    except Exception:            # noqa: BLE001 - best effort
-                        pass
                 ctx.check_cancel()
 
                 elapsed = time.time() - started
@@ -172,12 +185,14 @@ class RunPod(Engine):
                 status = (data or {}).get("status", "")
 
                 if status in TERMINAL_OK:
+                    finished = True
                     out = data.get("output")
                     if out is None:
                         raise EngineError("RunPod finished but returned no output.")
                     ctx.progress("transcribing", 0.92)
                     return out
                 if status in TERMINAL_BAD:
+                    finished = True
                     detail = data.get("error") or data.get("output") or status
                     raise EngineError(f"RunPod job {status.lower()}: {json.dumps(detail)[:500]}")
 
@@ -186,7 +201,18 @@ class RunPod(Engine):
                 _sleep_cancellable(ctx, interval)
                 interval = min(interval * 1.25, 10.0)
         finally:
-            pass
+            # Cancelling has to happen here. The poll loop spends nearly all its
+            # time inside _sleep_cancellable and a 60 s http.get, both of which
+            # raise or return straight out of the loop — so a cancel issued at
+            # the top of the loop was effectively never reached, and the GPU
+            # kept running (and billing) after the user hit Cancel.
+            if not finished:
+                try:
+                    http.post(f"{BASE}/{endpoint}/cancel/{job_id}", headers=headers,
+                              json_body={}, timeout=30, retries=0)
+                    ctx.log("Asked RunPod to cancel the job")
+                except Exception:            # noqa: BLE001 - best effort
+                    pass
 
 
 def _parse_output(output, ctx: Context, model: str) -> Result:

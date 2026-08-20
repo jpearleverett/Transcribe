@@ -66,6 +66,7 @@ class JobStore:
         self._lock = threading.RLock()
         self._listeners: list = []
         self._cancelled: set = set()
+        self._last_emit: dict = {}      # job id -> (fraction, monotonic-ish time)
         self._queue: queue.Queue = queue.Queue()
         self._runner: Optional[Callable] = None
         self._worker: Optional[threading.Thread] = None
@@ -168,6 +169,7 @@ class JobStore:
         with self._lock:
             job = self._jobs.pop(job_id, None)
             self._cancelled.discard(job_id)
+            self._last_emit.pop(job_id, None)
         if not job:
             return False
         for p in (self._path(job_id), self._result_path(job_id)):
@@ -199,20 +201,30 @@ class JobStore:
     # ---------------- progress ----------------
 
     def progress(self, job_id: str, stage: str, fraction: float) -> None:
-        """Update coarse progress. Rate-limited so a fast upload can't spam SSE."""
+        """Update coarse progress. Rate-limited so a fast upload can't spam SSE.
+
+        The throttle baseline is what was last *emitted*, tracked separately
+        from the job's current values. Comparing against the job itself would
+        move the goalposts on every skipped call, so a steady stream of small
+        updates — exactly what an upload produces — would be suppressed forever
+        instead of coalesced, and the progress bar would never move.
+        """
+        now = time.time()
         with self._lock:
             job = self._jobs.get(job_id)
             if not job:
                 return
             fraction = max(0.0, min(1.0, fraction))
-            same_stage = job.stage == stage
-            tiny_move = abs(fraction - job.progress) < 0.01
-            recent = time.time() - job.updated < 0.4
+            last_frac, last_time = self._last_emit.get(job_id, (-1.0, 0.0))
+            same_stage = job.stage == stage        # must be read before assigning
             job.stage = stage
             job.progress = fraction
-            job.updated = time.time()
-            if same_stage and tiny_move and recent:
+            job.updated = now
+            if (same_stage and last_frac >= 0.0
+                    and abs(fraction - last_frac) < 0.01
+                    and now - last_time < 0.4):
                 return          # skip both the disk write and the SSE frame
+            self._last_emit[job_id] = (fraction, now)
             self._persist(job)
         self._emit(job)
 
@@ -264,9 +276,24 @@ class JobStore:
             try:
                 job_id = self._queue.get(timeout=30)
             except queue.Empty:
-                return  # idle: let the thread go, enqueue() will start a new one
+                # Idle: let the thread go so we are not holding one open
+                # forever. Re-check under the same lock _ensure_worker uses,
+                # otherwise an enqueue landing between the timeout and this
+                # thread's death sees a still-alive worker, declines to start a
+                # replacement, and the job is stranded in the queue.
+                with self._lock:
+                    if self._queue.empty():
+                        self._worker = None
+                        return
+                continue
             job = self.get(job_id)
             if not job or self.is_cancelled(job_id):
+                # Clear the flag here too. It is set by cancel() and normally
+                # cleared in the finally below, but a job cancelled while still
+                # queued never reaches that block — leaving the id latched, so
+                # every later Retry would be dropped on this same line.
+                with self._lock:
+                    self._cancelled.discard(job_id)
                 continue
             try:
                 self.update(job_id, status=RUNNING, stage="starting", progress=0.0, error="")

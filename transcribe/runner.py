@@ -10,6 +10,22 @@ from .align import diarize_transcript
 from .engines import base as engines
 
 
+def _clean_intermediates(job_id: str) -> None:
+    """Remove this job's working files.
+
+    Every intermediate is named `<job id>.<something>`; the original upload is
+    named `<timestamp>-<random>-<filename>` and so is never matched.
+    """
+    try:
+        for tmp in config.UPLOAD_DIR.glob(f"{job_id}.*"):
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 def run_job(job) -> None:
     store = jobs_mod.store()
     cfg = config.load()
@@ -56,7 +72,13 @@ def run_job(job) -> None:
     )
 
     started = time.time()
-    result = engine.transcribe(ctx)
+    try:
+        result = engine.transcribe(ctx)
+    finally:
+        # Intermediates are cleaned here, not after a successful save. A failed
+        # or cancelled job is exactly when they pile up, and on a phone a few
+        # abandoned WAV copies of an hour-long recording fills the disk fast.
+        _clean_intermediates(job.id)
     ctx.check_cancel()
 
     if result.is_empty():
@@ -113,14 +135,6 @@ def run_job(job) -> None:
         language=result.language or job.language,
         speakers=job.speakers or {},
     )
-
-    # Interim files are worth their disk only until the job finishes.
-    for tmp in (ctx._wav, config.UPLOAD_DIR / f"{job.id}.48k.opus"):
-        if tmp and Path(tmp).exists():
-            try:
-                Path(tmp).unlink()
-            except OSError:
-                pass
 
     if not cfg["keep_audio"]:
         try:

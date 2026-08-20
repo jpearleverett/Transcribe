@@ -38,6 +38,7 @@ COMPUTE_TYPE = os.environ.get("COMPUTE_TYPE", "float16")
 # difference between a 5-second job and a 90-second one.
 _whisper = None
 _batched = None
+_whisper_name = None
 _diarizer = None
 
 
@@ -45,13 +46,16 @@ def log(msg):
     print(f"[handler] {msg}", flush=True)
 
 
-def get_whisper():
-    global _whisper, _batched
-    if _whisper is None:
+def get_whisper(name=None):
+    """Load (and cache) a model. Keyed by name so a per-request model works."""
+    global _whisper, _batched, _whisper_name
+    name = name or MODEL_NAME
+    if _whisper is None or name != _whisper_name:
         from faster_whisper import WhisperModel, BatchedInferencePipeline
         t = time.time()
-        log(f"loading {MODEL_NAME} ({COMPUTE_TYPE}) on {DEVICE}")
-        _whisper = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
+        log(f"loading {name} ({COMPUTE_TYPE}) on {DEVICE}")
+        _whisper = WhisperModel(name, device=DEVICE, compute_type=COMPUTE_TYPE)
+        _whisper_name = name
         try:
             _batched = BatchedInferencePipeline(model=_whisper)
         except Exception as e:                      # noqa: BLE001
@@ -118,7 +122,16 @@ def fetch_audio(job_input, workdir: Path) -> Path:
 
 
 def transcribe(wav: Path, job_input: dict) -> dict:
-    model, batched = get_whisper()
+    requested = (job_input.get("model") or "").strip() or None
+    try:
+        model, batched = get_whisper(requested)
+    except Exception as e:                          # noqa: BLE001
+        if not requested or requested == MODEL_NAME:
+            raise
+        # A model this image cannot load should not fail the whole job when the
+        # baked-in default would do.
+        log(f"could not load requested model {requested!r} ({e}); using {MODEL_NAME}")
+        model, batched = get_whisper(MODEL_NAME)
     language = job_input.get("language") or None
     beam_size = int(job_input.get("beam_size") or 5)
 
@@ -160,6 +173,7 @@ def transcribe(wav: Path, job_input: dict) -> dict:
         "text": "".join(texts).strip(),
         "language": getattr(info, "language", "") or (language or ""),
         "duration": float(getattr(info, "duration", 0.0) or 0.0),
+        "model": _whisper_name or MODEL_NAME,
     }
 
 
@@ -205,7 +219,7 @@ def handler(job):
                 result["turns"] = []
                 result["diarization_error"] = str(e)[:500]
 
-        result["model"] = MODEL_NAME
+        result.setdefault("model", MODEL_NAME)
         result["elapsed"] = round(time.time() - started, 1)
         return result
 

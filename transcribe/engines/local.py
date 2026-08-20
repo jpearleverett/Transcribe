@@ -115,7 +115,7 @@ class Local(Engine):
         wav = ctx.wav16k()
         ctx.check_cancel()
 
-        words = self._run_whisper(ctx, wav, cfg)
+        words, detected = self._run_whisper(ctx, wav, cfg)
         ctx.check_cancel()
 
         turns = None
@@ -125,13 +125,12 @@ class Local(Engine):
         return Result(
             words=words,
             turns=turns,
-            language=getattr(self, "_detected_language", "") or (
-                ctx.language if ctx.language != "auto" else ""),
+            language=detected or (ctx.language if ctx.language != "auto" else ""),
             model=self.model_path().name,
             text=" ".join(w.text for w in words),
         )
 
-    def _run_whisper(self, ctx: Context, wav: Path, cfg: dict) -> list:
+    def _run_whisper(self, ctx: Context, wav: Path, cfg: dict) -> tuple:
         model = self.model_path()
         threads = int(cfg.get("local_threads") or 0) or max(2, (os.cpu_count() or 4) - 1)
         out_prefix = ctx.workdir / f"{ctx.job_id}.whisper"
@@ -184,11 +183,14 @@ class Local(Engine):
         if not words:
             raise EngineError("whisper.cpp found no speech in this recording.")
         detected = ((data.get("result") or {}).get("language") or "").strip()
-        if detected and detected != "auto":
-            self._detected_language = detected
+        if detected == "auto":
+            detected = ""
         ctx.log(f"whisper.cpp: {len(words)} words"
                 + (f", language {detected}" if detected else ""))
-        return words
+        # Returned rather than stashed on self: base.register instantiates each
+        # engine exactly once, so anything written to the instance leaks into
+        # every later job — a German recording would relabel the next one.
+        return words, detected
 
     def _spawn(self, ctx: Context, cmd: list) -> tuple:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

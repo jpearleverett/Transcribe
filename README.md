@@ -243,7 +243,7 @@ transcribe/          the server
 web/                 the front end (no build step, no framework)
 gpu/                 the RunPod GPU worker
 tools/               diarize_sherpa.py — offline diarization helper
-tests/               130 tests, no network needed
+tests/               144 tests, no network needed
 ```
 
 Run the tests with `python3 -m unittest discover -s tests`.

@@ -74,8 +74,10 @@ class AssemblyAI(Engine):
         ctx.log(f"AssemblyAI job {tid}")
 
         data = self._poll(ctx, tid, headers)
-        used = data.get("speech_model_used") or MODEL
-        if used != MODEL:
+        # The echo-back field has been named both ways; check both rather than
+        # coalescing to MODEL, which would make a substitution invisible.
+        used = data.get("speech_model_used") or data.get("speech_model") or ""
+        if used and used != MODEL:
             ctx.log(f"Note: AssemblyAI ran '{used}', not '{MODEL}'.")
 
         words = []
@@ -84,10 +86,14 @@ class AssemblyAI(Engine):
         for utt in data.get("utterances") or []:
             spk = normalize_speaker(utt.get("speaker"))
             for w in utt.get("words") or []:
-                words.append(_word(w, spk))
+                word = _word(w, spk)
+                if word is not None:
+                    words.append(word)
         if not words:
             for w in data.get("words") or []:
-                words.append(_word(w, normalize_speaker(w.get("speaker"))))
+                word = _word(w, normalize_speaker(w.get("speaker")))
+                if word is not None:
+                    words.append(word)
 
         if not words and not (data.get("text") or "").strip():
             raise EngineError("AssemblyAI returned an empty transcript.")
@@ -95,7 +101,7 @@ class AssemblyAI(Engine):
         return Result(
             words=words,
             language=data.get("language_code") or ctx.language,
-            model=used,
+            model=used or MODEL,
             text=data.get("text") or "",
         )
 
@@ -128,15 +134,33 @@ class AssemblyAI(Engine):
             interval = min(interval * 1.3, 15.0)
 
 
-def _word(w: dict, speaker) -> Word:
-    # milliseconds -> seconds
+def _word(w: dict, speaker):
+    """Milliseconds to seconds, tolerating an explicit null timestamp.
+
+    dict.get's default only applies when the key is absent; a present-but-null
+    "start" yields None, and float(None) raises a TypeError that would escape as
+    a bare crash rather than a readable engine error.
+    """
+    start = _f(w.get("start"))
+    if start is None:
+        return None
+    end = _f(w.get("end"))
+    start /= 1000.0
+    end = end / 1000.0 if end is not None else None
     return Word(
-        start=float(w.get("start", 0)) / 1000.0,
-        end=float(w.get("end", 0)) / 1000.0,
+        start=start,
+        end=end if end is not None and end > start else start + 0.05,
         text=w.get("text") or "",
         speaker=speaker if speaker is not None else normalize_speaker(w.get("speaker")),
         confidence=w.get("confidence"),
     )
+
+
+def _f(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def _sleep_cancellable(ctx: Context, seconds: float) -> None:

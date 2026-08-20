@@ -47,6 +47,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, status: int, body: bytes = b"", ctype: str = "application/json",
               extra: dict = None, head_only: bool = False):
+        # A HEAD response must carry the headers but no body. Every JSON route
+        # is reachable by HEAD, and sending a body there leaves bytes in a
+        # keep-alive socket that the next request parses as its request line.
+        head_only = head_only or self.command == "HEAD"
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -110,7 +114,13 @@ class Handler(BaseHTTPRequestHandler):
             or self.query().get("token")
             or _cookie(self.headers.get("Cookie", ""), "transcribe_token")
         )
-        return bool(supplied) and secrets.compare_digest(supplied, AUTH_TOKEN)
+        if not supplied:
+            return False
+        # compare_digest raises TypeError on non-ASCII str arguments, and this
+        # runs before the request try/except — so a token with an accent in it
+        # would drop the connection with no response at all. Compare bytes.
+        return secrets.compare_digest(supplied.encode("utf-8", "replace"),
+                                      AUTH_TOKEN.encode("utf-8"))
 
     # -------------------- routing --------------------
 
@@ -368,13 +378,23 @@ class Handler(BaseHTTPRequestHandler):
         if not path.exists():
             return self.fail("The audio file has been deleted.", 404)
 
-        size = path.stat().st_size
+        try:
+            fh = open(path, "rb")
+        except OSError:
+            # Opening before we send any headers matters: once the status line
+            # is out, an error here would fall through to the generic 500
+            # handler and write a *second* response into the same connection,
+            # which hangs the browser rather than failing cleanly.
+            return self.fail("The audio file could not be read.", 404)
+
+        size = os.fstat(fh.fileno()).st_size   # same fd, so no TOCTOU with stat()
         ctype = job.media_type or mimetypes.guess_type(str(path))[0] or "application/octet-stream"
         if ";" in ctype:
             ctype = ctype.split(";")[0].strip()
         rng = self.headers.get("Range", "")
         start, end = 0, size - 1
         status = 200
+        _close = fh.close
 
         m = re.match(r"bytes=(\d*)-(\d*)", rng)
         if m and size:
@@ -384,10 +404,12 @@ class Handler(BaseHTTPRequestHandler):
                 end = int(g2) if g2 else size - 1
             elif g2:
                 start = max(0, size - int(g2))     # suffix range: last N bytes
-            if start >= size:
+            end = min(end, size - 1)
+            if start >= size or start > end:
+                # "bytes=100-50" would otherwise yield a negative Content-Length.
+                _close()
                 self._send(416, b"", "text/plain", {"Content-Range": f"bytes */{size}"})
                 return
-            end = min(end, size - 1)
             status = 206
 
         length = end - start + 1
@@ -400,20 +422,26 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.end_headers()
         if head_only:
+            _close()
             return
 
         try:
-            with open(path, "rb") as fh:
-                fh.seek(start)
-                remaining = length
-                while remaining > 0:
-                    chunk = fh.read(min(CHUNK, remaining))
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-                    remaining -= len(chunk)
+            fh.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = fh.read(min(CHUNK, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
         except (BrokenPipeError, ConnectionResetError):
             pass                        # seeking mid-download does this; harmless
+        except OSError:
+            # Headers are already out, so there is no way to report this in
+            # band. Drop the connection rather than desync it.
+            self.close_connection = True
+        finally:
+            _close()
 
     # -------------------- SSE --------------------
 

@@ -391,6 +391,133 @@ class ServerTest(unittest.TestCase):
                      {"Content-Type": "application/json"})
             cfg_mod.load(force=True)
 
+    def test_18d_cancel_while_queued_then_retry(self):
+        """A job cancelled before it starts must still be retryable.
+
+        cancel() latches the id in the store's cancelled set; the worker clears
+        it in a finally block that a never-started job never reaches. If it
+        stays latched, every later Retry is silently dropped.
+        """
+        store = jobs_mod.store()
+        # A private copy: store.delete() unlinks the job's audio, and pointing
+        # at the shared fixture would delete it out from under later tests.
+        own = self.tmp / "queued-cancel.wav"
+        own.write_bytes(self.wav.read_bytes())
+        job = store.create(name="queued-cancel.wav", engine="mock",
+                           audio_file=str(own))
+        store.cancel(job.id)
+        store.enqueue(job.id)
+
+        # Wait for the worker to drain the cancelled entry and release the flag.
+        end = time.time() + 10
+        while store.is_cancelled(job.id) and time.time() < end:
+            time.sleep(0.05)
+        self.assertFalse(store.is_cancelled(job.id),
+                         "the cancelled flag must not outlive the job it cancelled")
+
+        self.req(f"/api/jobs/{job.id}/retry", "POST", b"")
+        done = self.wait_for(job.id, "done", timeout=20)
+        self.assertEqual(done["status"], "done")
+        store.delete(job.id)
+
+    def test_18e_progress_throttle_still_advances(self):
+        """Small, frequent updates must coalesce, not be suppressed forever."""
+        store = jobs_mod.store()
+        job = store.create(name="prog.wav", engine="mock")
+        seen = []
+        q = store.subscribe()
+        try:
+            for i in range(1, 61):
+                store.progress(job.id, "uploading", i * 0.005)
+                time.sleep(0.012)
+            while not q.empty():
+                ev = q.get_nowait()
+                if ev.get("type") == "job" and ev["job"]["id"] == job.id:
+                    seen.append(ev["job"]["progress"])
+        finally:
+            store.unsubscribe(q)
+            store.delete(job.id)
+        self.assertGreaterEqual(len(seen), 2,
+                                "throttling must coalesce updates, not drop them all")
+        self.assertGreater(max(seen), 0.1, "progress must actually advance")
+
+    def test_18f_head_requests_carry_no_body(self):
+        """HEAD must return headers only; a body desyncs a keep-alive socket."""
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
+        for path in ("/api/health", "/api/config", "/api/jobs", "/", "/static/app.js",
+                     "/api/nope"):
+            conn.request("HEAD", path)
+            resp = conn.getresponse()
+            body = resp.read()
+            self.assertEqual(body, b"", f"HEAD {path} returned a {len(body)}-byte body")
+            resp.close()
+        # The connection must still be usable, which is the whole point.
+        conn.request("GET", "/api/health")
+        self.assertTrue(json.loads(conn.getresponse().read())["ok"])
+        conn.close()
+
+    def test_18g_invalid_range_is_rejected_not_negative(self):
+        """bytes=100-50 must 416, not emit a negative Content-Length."""
+        created = self.upload(name="range.wav")
+        job_id = created["job"]["id"]
+        self.wait_for(job_id)
+        for bad in ("bytes=100-50", "bytes=999999999-", "bytes=50-10"):
+            try:
+                _, headers, _ = self.req(f"/api/jobs/{job_id}/audio", raw=True,
+                                         headers={"Range": bad})
+                self.fail(f"{bad} should have been rejected")
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 416, bad)
+                self.assertGreaterEqual(int(e.headers.get("Content-Length", 0)), 0)
+        jobs_mod.store().delete(job_id)
+
+    def test_18h_non_ascii_token_does_not_kill_the_connection(self):
+        """A non-ASCII ?token= must return 401, not drop the socket."""
+        original = server.AUTH_TOKEN
+        server.AUTH_TOKEN = "correct-token"
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                self.req("/api/health?token=" + urllib.parse.quote("café–ünïcode"))
+            self.assertEqual(cm.exception.code, 401)
+            # And the right token still works.
+            data = self.req("/api/health?token=correct-token")
+            self.assertTrue(data["ok"])
+        finally:
+            server.AUTH_TOKEN = original
+
+    def test_18i_audio_missing_on_disk_fails_cleanly(self):
+        """A file that vanishes must produce one clean error, not two responses."""
+        created = self.upload(name="vanishing.wav")
+        job_id = created["job"]["id"]
+        self.wait_for(job_id)
+        path = Path(jobs_mod.store().get(job_id).audio_file)
+        path.unlink()
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self.req(f"/api/jobs/{job_id}/audio", raw=True)
+        self.assertEqual(cm.exception.code, 404)
+        # Server still healthy afterwards.
+        self.assertTrue(self.req("/api/health")["ok"])
+        jobs_mod.store().delete(job_id)
+
+    def test_18j_intermediates_cleaned_even_when_a_job_fails(self):
+        """Working files must not survive a failure — disk is scarce on a phone."""
+        from transcribe import config as cfg_mod
+        created = self.upload(name="leaky.wav", fail="1")
+        job_id = created["job"]["id"]
+        # Simulate an engine leaving intermediates behind before it failed.
+        for suffix in (".16k.wav", ".48k.opus", ".rp.opus", ".turns.json"):
+            (cfg_mod.UPLOAD_DIR / f"{job_id}{suffix}").write_bytes(b"x" * 1024)
+        jobs_mod.store().update(job_id, options={})
+        self.req(f"/api/jobs/{job_id}/retry", "POST", b"")
+        self.wait_for(job_id, "done", timeout=20)
+
+        leftovers = list(cfg_mod.UPLOAD_DIR.glob(f"{job_id}.*"))
+        self.assertEqual(leftovers, [], f"left behind: {[p.name for p in leftovers]}")
+        # The original upload must survive — the player needs it.
+        self.assertTrue(Path(jobs_mod.store().get(job_id).audio_file).exists())
+        jobs_mod.store().delete(job_id)
+
     def test_19_health(self):
         data = self.req("/api/health")
         self.assertTrue(data["ok"])

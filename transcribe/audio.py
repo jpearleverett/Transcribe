@@ -12,6 +12,7 @@ import json
 import shutil
 import struct
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -119,26 +120,37 @@ def to_wav16k(src: Path, dst: Path, *, on_progress=None, duration: float = 0.0) 
         "-progress", "pipe:1", "-nostats",
         "-y", str(dst),
     ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    # stderr goes to a file, not a pipe. Reading only stdout while ffmpeg writes
+    # to a stderr PIPE deadlocks as soon as stderr exceeds the ~64 KiB pipe
+    # buffer: ffmpeg blocks in write(), stops emitting progress on stdout, and
+    # the read loop waits forever — hanging the job and stalling the queue
+    # behind it. A file has no such limit and needs no second reader thread.
+    err_file = tempfile.TemporaryFile(mode="w+")
     try:
-        for line in proc.stdout:
-            if on_progress and line.startswith("out_time_ms=") and duration > 0:
-                try:
-                    done = int(line.split("=", 1)[1].strip()) / 1_000_000.0
-                    on_progress(min(1.0, done / duration))
-                except ValueError:
-                    pass
-        proc.wait(timeout=60)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        raise AudioError("ffmpeg timed out")
-    finally:
-        if proc.stdout:
-            proc.stdout.close()
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err_file, text=True)
+        try:
+            for line in proc.stdout:
+                if on_progress and line.startswith("out_time_ms=") and duration > 0:
+                    try:
+                        done = int(line.split("=", 1)[1].strip()) / 1_000_000.0
+                        on_progress(min(1.0, done / duration))
+                    except ValueError:
+                        pass
+            proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
+            raise AudioError("ffmpeg timed out")
+        finally:
+            if proc.stdout:
+                proc.stdout.close()
 
-    if proc.returncode != 0:
-        err = (proc.stderr.read() if proc.stderr else "") or ""
-        raise AudioError(f"ffmpeg failed to decode this file: {err.strip()[:500]}")
+        if proc.returncode != 0:
+            err_file.seek(0)
+            err = err_file.read()
+            raise AudioError(f"ffmpeg failed to decode this file: {err.strip()[:500]}")
+    finally:
+        err_file.close()
     if not dst.exists() or dst.stat().st_size <= 44:
         raise AudioError("conversion produced an empty file — is there any audio in it?")
     return dst

@@ -192,14 +192,17 @@ class DeepgramTest(unittest.TestCase):
         },
     }
 
-    def test_uses_v2_diarizer_not_the_deprecated_flag(self):
+    def test_sends_both_diarization_parameters(self):
         set_key("deepgram")
         with Patched(upload_raw=self.FIXTURE) as p:
             result = base.get("deepgram").transcribe(make_ctx())
         url = p.calls[0]["url"]
-        self.assertIn("diarize_model=latest", url,
-                      "diarize=true silently routes to the old v1 diarizer")
-        self.assertNotIn("diarize=true", url)
+        # Sources disagree on whether diarize_model enables diarization or only
+        # selects which one runs. Getting it wrong costs every speaker label, so
+        # send both: diarize=true to enable, diarize_model=latest to opt into v2
+        # rather than the old default.
+        self.assertIn("diarize=true", url)
+        self.assertIn("diarize_model=latest", url)
         self.assertIn("model=nova-3", url)
         self.assertEqual(p.calls[0]["headers"]["Authorization"], "Token test-key")
         self.assertEqual([w.text for w in result.words], ["Hello", "there.", "Hi."],
@@ -214,6 +217,24 @@ class DeepgramTest(unittest.TestCase):
         url = p.calls[0]["url"]
         self.assertIn("language=es", url)
         self.assertNotIn("detect_language", url)
+
+    def test_missing_speakers_is_reported_not_silent(self):
+        """A 200 with no speaker labels must be surfaced, not shown as 1 speaker."""
+        set_key("deepgram")
+        no_speakers = {"results": {"channels": [{"alternatives": [{
+            "transcript": "Hello there.",
+            "words": [{"word": "hello", "punctuated_word": "Hello", "start": 0.0,
+                       "end": 0.4, "confidence": 0.99}],
+        }]}]}}
+        logged = []
+        ctx = make_ctx()
+        ctx.log = logged.append
+        with Patched(upload_raw=no_speakers):
+            result = base.get("deepgram").transcribe(ctx)
+        self.assertTrue(result.words)
+        self.assertIsNone(result.words[0].speaker)
+        self.assertTrue(any("no speaker labels" in m for m in logged),
+                        f"expected a warning in the job log, got {logged}")
 
     def test_malformed_response_raises(self):
         set_key("deepgram")
@@ -278,6 +299,32 @@ class AssemblyAITest(unittest.TestCase):
             with self.assertRaises(EngineError) as cm:
                 base.get("assemblyai").transcribe(make_ctx())
         self.assertIn("Download error", str(cm.exception))
+
+    def test_null_timestamp_does_not_crash(self):
+        """A present-but-null timestamp must be skipped, not raise TypeError."""
+        set_key("assemblyai")
+        nulls = {"status": "completed", "text": "Hey there.",
+                 "utterances": [{"speaker": "A", "words": [
+                     {"text": "Hey", "start": None, "end": None},
+                     {"text": "there.", "start": 100, "end": None},
+                 ]}]}
+        with Patched(upload_raw={"upload_url": "u"}, post={"id": "t"}, get=nulls):
+            result = base.get("assemblyai").transcribe(make_ctx())
+        self.assertEqual([w.text for w in result.words], ["there."])
+        self.assertGreater(result.words[0].end, result.words[0].start)
+
+    def test_model_substitution_is_noticed(self):
+        set_key("assemblyai")
+        swapped = dict(self.COMPLETED)
+        swapped.pop("speech_model_used", None)
+        swapped["speech_model"] = "universal-2"
+        logged = []
+        ctx = make_ctx()
+        ctx.log = logged.append
+        with Patched(upload_raw={"upload_url": "u"}, post={"id": "t"}, get=swapped):
+            result = base.get("assemblyai").transcribe(ctx)
+        self.assertEqual(result.model, "universal-2")
+        self.assertTrue(any("universal-2" in m for m in logged), logged)
 
     def test_falls_back_to_flat_word_list(self):
         set_key("assemblyai")
@@ -419,6 +466,91 @@ class RunPodTest(unittest.TestCase):
         finally:
             audio_mod.FFMPEG = orig
         self.assertIn("hours", str(cm.exception))
+
+
+    def test_cancel_reaches_runpod(self):
+        """Cancelling must actually stop the GPU job, not just the local poll.
+
+        The poll loop spends nearly all its time asleep or inside a 60s GET, so
+        a cancel issued at the top of the loop was never reached and the GPU
+        kept running — and billing.
+        """
+        state = {"polls": 0}
+
+        def fake_get(url, *a, **kw):
+            state["polls"] += 1
+            return {"status": "IN_PROGRESS"}
+
+        ctx = make_ctx()
+        ctx.cancelled = lambda: state["polls"] >= 1     # cancel after first poll
+
+        with Patched(post={"id": "job-9"}, get=fake_get) as p:
+            with self.assertRaises(base.Cancelled):
+                base.get("runpod").transcribe(ctx)
+
+        cancels = [c["url"] for c in p.calls if "/cancel/" in c["url"]]
+        self.assertEqual(cancels, ["https://api.runpod.ai/v2/ep123/cancel/job-9"],
+                         "a cancelled job must be cancelled remotely, exactly once")
+
+    def test_submit_is_not_retried(self):
+        """/run enqueues a job, so a replay would start a second GPU run."""
+        with Patched(post={"id": "j"}, get={"status": "COMPLETED", "output": self.OUTPUT}) as p:
+            base.get("runpod").transcribe(make_ctx())
+        submit = p.calls[0]
+        self.assertEqual(submit.get("retries"), 0,
+                         "submitting is not idempotent and must not be retried")
+
+    def test_oversized_payload_rejected_when_duration_unknown(self):
+        """With no duration, compression can't be sized — check the bytes."""
+        from transcribe.engines import runpod as rp
+        from transcribe import audio as audio_mod
+        oversized = int(rp.RUNSYNC_LIMIT_MB * 1024 * 1024 * 0.85)   # ~23 MB once base64'd
+
+        def fake_compress(src, dst, bitrate="48k"):
+            # duration==0 means the bitrate could not be sized, so compression
+            # runs at the default and can still land over the limit.
+            dst.write_bytes(b"0" * oversized)
+            return dst
+
+        big = config.HOME / "unknown.wav"
+        big.write_bytes(b"0" * 1024)
+        ctx = Context(job_id="j9", source=big, duration=0.0, workdir=big.parent)
+        orig_ff, audio_mod.FFMPEG = audio_mod.FFMPEG, "/usr/bin/ffmpeg"
+        orig_c, audio_mod.to_compressed = audio_mod.to_compressed, fake_compress
+        try:
+            # A terminal get() so a regression in the guard fails this test
+            # fast instead of polling forever and hanging the whole suite.
+            with Patched(post={"id": "j"},
+                         get={"status": "FAILED", "error": "should not have submitted"}) as p:
+                with self.assertRaises(EngineError) as cm:
+                    base.get("runpod").transcribe(ctx)
+        finally:
+            audio_mod.FFMPEG = orig_ff
+            audio_mod.to_compressed = orig_c
+            big.unlink()
+        self.assertIn("request limit", str(cm.exception))
+        self.assertEqual(p.calls, [], "must fail before submitting an oversized body")
+
+    def test_temp_audio_is_deleted_after_encoding(self):
+        from transcribe import audio as audio_mod
+        made = {}
+
+        def fake_compress(src, dst, bitrate="48k"):
+            dst.write_bytes(b"opusdata" * 100)
+            made["path"] = dst
+            return dst
+
+        orig_ff, audio_mod.FFMPEG = audio_mod.FFMPEG, "/usr/bin/ffmpeg"
+        orig_c, audio_mod.to_compressed = audio_mod.to_compressed, fake_compress
+        try:
+            with Patched(post={"id": "j"}, get={"status": "COMPLETED", "output": self.OUTPUT}):
+                base.get("runpod").transcribe(make_ctx())
+        finally:
+            audio_mod.FFMPEG = orig_ff
+            audio_mod.to_compressed = orig_c
+        self.assertIn("path", made)
+        self.assertFalse(made["path"].exists(),
+                         "the compressed copy must not be left on the phone's disk")
 
 
 class RegistryTest(unittest.TestCase):

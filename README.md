@@ -236,7 +236,7 @@ transcribe/          the server
 web/                 the front end (no build step, no framework)
 gpu/                 the RunPod GPU worker
 tools/               diarize_sherpa.py — offline diarization helper
-tests/               101 tests, no network needed
+tests/               130 tests, no network needed
 ```
 
 Run the tests with `python3 -m unittest discover -s tests`.
@@ -276,6 +276,10 @@ nothing anywhere.
 API keys are stored in `~/.transcribe/config.json` with `0600` permissions,
 never in the repo, and the server never sends a key back to the browser — the
 settings screen only ever shows whether one is set.
+
+Keys can also come from the environment (`DEEPGRAM_API_KEY`, `RUNPOD_API_KEY`,
+and so on). A key entered in Settings takes precedence over the environment, and
+Settings says when a key came from the environment rather than from you.
 
 Uploaded audio stays in `~/.transcribe/uploads` so the player can seek through
 it. Deleting a transcript deletes its audio.

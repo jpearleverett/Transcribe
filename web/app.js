@@ -786,15 +786,16 @@ function openSettings() {
   for (const eng of state.engines) {
     if (!eng.needs_key && !(eng.config_fields || []).length) continue;
     const hint = (state.config.key_hint || {})[eng.name];
+    const fromEnv = (state.config.from_env || []).includes(eng.name);
     const row = document.createElement('div');
     row.className = 'key-row';
     let html = `<div class="key-head">
-        <span>${esc(eng.label)}${hint ? ` <span class="key-set">key set (${esc(hint)})</span>` : ''}</span>
+        <span>${esc(eng.label)}${hint ? ` <span class="key-set">key set${fromEnv ? ' from environment' : ''} (${esc(hint)})</span>` : ''}</span>
         ${eng.signup_url ? `<a href="${esc(eng.signup_url)}" target="_blank" rel="noopener">Get a key</a>` : ''}
       </div>`;
     if (eng.needs_key) {
       html += `<input type="password" data-engine="${esc(eng.name)}"
-             placeholder="${hint ? 'API key — leave blank to keep' : 'Paste API key'}"
+             placeholder="${hint ? (fromEnv ? 'Paste a key to override the environment' : 'API key — leave blank to keep') : 'Paste API key'}"
              autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">`;
     }
     for (const f of eng.config_fields || []) {

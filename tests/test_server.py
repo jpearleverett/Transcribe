@@ -365,6 +365,32 @@ class ServerTest(unittest.TestCase):
                          "server must close a connection whose body it did not read")
         conn.close()
 
+    def test_18c_stored_key_beats_environment(self):
+        import transcribe.config as cfg_mod
+        # Start from no stored key, so the environment is the only source.
+        self.req("/api/config", "POST",
+                 json.dumps({"keys": {"deepgram": ""}}).encode(),
+                 {"Content-Type": "application/json"})
+        os.environ["DEEPGRAM_API_KEY"] = "env-key-value"
+        try:
+            cfg_mod.load(force=True)
+            self.assertEqual(cfg_mod.api_key("deepgram"), "env-key-value",
+                             "env supplies a key when none is stored")
+            self.assertIn("deepgram", cfg_mod.redacted()["from_env"])
+
+            self.req("/api/config", "POST",
+                     json.dumps({"keys": {"deepgram": "typed-by-user"}}).encode(),
+                     {"Content-Type": "application/json"})
+            self.assertEqual(cfg_mod.api_key("deepgram"), "typed-by-user",
+                             "a key typed into Settings must override the environment")
+            self.assertNotIn("deepgram", cfg_mod.redacted()["from_env"])
+        finally:
+            os.environ.pop("DEEPGRAM_API_KEY", None)
+            self.req("/api/config", "POST",
+                     json.dumps({"keys": {"deepgram": ""}}).encode(),
+                     {"Content-Type": "application/json"})
+            cfg_mod.load(force=True)
+
     def test_19_health(self):
         data = self.req("/api/health")
         self.assertTrue(data["ok"])

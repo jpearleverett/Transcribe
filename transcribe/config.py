@@ -91,11 +91,16 @@ def load(force: bool = False) -> dict:
                 # A corrupt config must not brick the server; fall back to
                 # defaults and keep the bad file around for inspection.
                 print(f"[config] ignoring unreadable {CONFIG_PATH}: {e}")
+        # Environment keys are a *default*, not an override: a key typed into
+        # Settings must win, or saving one appears to do nothing and there is no
+        # way to tell why.
+        cfg["env_keys"] = []
         for engine, env in ENV_KEYS.items():
-            val = os.environ.get(env)
-            if val:
-                cfg["keys"][engine] = val.strip()
-        if os.environ.get("RUNPOD_ENDPOINT_ID"):
+            val = (os.environ.get(env) or "").strip()
+            if val and not cfg["keys"].get(engine):
+                cfg["keys"][engine] = val
+                cfg["env_keys"].append(engine)
+        if os.environ.get("RUNPOD_ENDPOINT_ID") and not cfg.get("runpod_endpoint"):
             cfg["runpod_endpoint"] = os.environ["RUNPOD_ENDPOINT_ID"].strip()
         if os.environ.get("TRANSCRIBE_PORT"):
             try:
@@ -171,6 +176,7 @@ def redacted() -> dict:
     cfg = dict(load())
     keys = cfg.pop("keys", {})
     cfg["has_key"] = {k: bool(v) for k, v in keys.items() if v}
+    cfg["from_env"] = list(cfg.pop("env_keys", []))
     cfg["key_hint"] = {
         k: (v[:3] + "…" + v[-4:]) if len(v) > 10 else "…"
         for k, v in keys.items() if v

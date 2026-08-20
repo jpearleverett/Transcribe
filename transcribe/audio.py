@@ -48,6 +48,14 @@ def probe(path: Path) -> dict:
                  "-show_format", "-show_streams", str(path)],
                 capture_output=True, text=True, timeout=120,
             )
+            if out.returncode != 0:
+                # ffprobe ran and rejected the file. Fail here rather than
+                # falling back to a zero duration and discovering it after
+                # uploading the file to a paid API.
+                detail = (out.stderr or "").strip().splitlines()
+                raise AudioError(
+                    "This file could not be read as audio"
+                    + (f": {detail[-1][:200]}" if detail else "."))
             if out.returncode == 0:
                 data = json.loads(out.stdout or "{}")
                 streams = [s for s in data.get("streams", []) if s.get("codec_type") == "audio"]

@@ -252,10 +252,12 @@ transcribe/          the server
 web/                 the front end (no build step, no framework)
 gpu/                 the RunPod GPU worker
 tools/               diarize_sherpa.py — offline diarization helper
-tests/               155 tests, no network needed
+tests/               180 tests, no network needed
 ```
 
-Run the tests with `python3 -m unittest discover -s tests`.
+Run the tests with `python3 -m unittest discover -s tests`. They need no
+network and no API keys; the ones that exercise real ffmpeg conversions skip
+themselves if it isn't installed.
 
 ---
 

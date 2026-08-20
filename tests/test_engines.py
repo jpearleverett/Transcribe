@@ -62,8 +62,23 @@ def tearDownModule():
 
 
 def make_ctx(**kw):
+    """A context over a real, decodable WAV.
+
+    It has to be genuine audio: where ffmpeg exists — as it does on Termux —
+    the engines compress before uploading, and a stub file would exercise the
+    fallback path instead of the one that actually runs on a phone.
+    """
     src = config.HOME / "sample.wav"
-    src.write_bytes(b"RIFF____WAVEfmt ")
+    if not src.exists():
+        import math
+        import struct
+        import wave
+        with wave.open(str(src), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"".join(
+                struct.pack("<h", int(9000 * math.sin(i / 14.0))) for i in range(16000)))
     return Context(job_id="testjob", source=src, duration=120.0,
                    workdir=src.parent, **kw)
 

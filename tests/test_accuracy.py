@@ -17,9 +17,11 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import itertools
+
 from transcribe.align import (
     Word, Turn, assign_speakers, smooth_speakers, smooth_sentences,
-    resolve_low_confidence,
+    resolve_low_confidence, enforce_speaker_count,
 )
 
 SENTENCES = [
@@ -305,6 +307,138 @@ class ConfidenceTest(unittest.TestCase):
         ]
         resolve_low_confidence(words, window=4.0)
         self.assertEqual(words[1].speaker, "B", "half a minute away is not context")
+
+
+def wder_one_to_one(pred, truth):
+    """Error rate under the best ONE-TO-ONE label mapping — the DER convention.
+
+    Using a many-to-one mapping instead would let every spurious cluster fold
+    back onto the correct speaker for free, making over-segmentation score as
+    perfect. That is not what a reader experiences: an invented third speaker
+    is an error even when its words are otherwise in the right place.
+    """
+    plabels = sorted({w.speaker for w in pred if w.speaker is not None})
+    tlabels = sorted(set(truth))
+    best = len(truth)
+    if len(plabels) <= len(tlabels):
+        pairs = ((plabels, perm) for perm in itertools.permutations(tlabels, len(plabels)))
+    else:
+        pairs = ((chosen, tlabels) for chosen in itertools.permutations(plabels, len(tlabels)))
+    for keys, values in pairs:
+        m = dict(zip(keys, values))
+        best = min(best, sum(1 for w, t in zip(pred, truth) if m.get(w.speaker) != t))
+    return best / max(len(truth), 1)
+
+
+def oversegmented(words, truth, seed, extra=1, share=0.35, whole_turns=True):
+    """A diarizer that invents extra speakers out of one real speaker's audio.
+
+    Two shapes, because they need opposite corrections: whole turns split into
+    their own cluster (bracketed by the *other* speaker), and short fragments
+    split out from inside a turn (bracketed by their own speaker).
+    """
+    rng = random.Random(seed)
+    out = [Word(w.start, w.end, w.text, speaker=truth[i], speaker_confidence=0.9)
+           for i, w in enumerate(words)]
+    spare = [f"S{n}" for n in range(extra)]
+    runs, cur, last = [], [], None
+    for i, t in enumerate(truth):
+        if t != last and cur:
+            runs.append(cur)
+            cur = []
+        cur.append(i)
+        last = t
+    if cur:
+        runs.append(cur)
+    for r in runs:
+        if truth[r[0]] != "A" or rng.random() >= share:
+            continue
+        tag = rng.choice(spare)
+        if whole_turns:
+            for i in r:
+                out[i].speaker = tag
+        else:
+            out[r[len(r) // 2]].speaker = tag
+    return out
+
+
+class SpeakerCountTest(unittest.TestCase):
+    """Applying a known speaker count after the fact.
+
+    Deepgram's API takes no speaker-count hint at all, so for that engine this
+    is the only place the user's answer can be used. Over-segmentation reads to
+    a user as ordinary misattribution: a stretch of what one person said simply
+    appears under somebody else's name.
+    """
+
+    SEEDS = 100
+
+    def setUp(self):
+        self.words, self.true_turns, self.truth = build_conversation()
+
+    def _mean(self, whole_turns, target):
+        import statistics
+        scores = []
+        for seed in range(self.SEEDS):
+            w = oversegmented(self.words, self.truth, seed, whole_turns=whole_turns)
+            if target:
+                enforce_speaker_count(w, target)
+            smooth_speakers(w)
+            smooth_sentences(w)
+            scores.append(wder_one_to_one(w, self.truth))
+        return statistics.mean(scores)
+
+    def test_recovers_whole_turns_split_into_a_new_cluster(self):
+        off = self._mean(whole_turns=True, target=0)
+        on = self._mean(whole_turns=True, target=2)
+        print(f"\n  whole turns split off: {off:.1%} -> {on:.1%} with the count set")
+        self.assertLess(on, off * 0.5, "should cut this error class sharply")
+
+    def test_recovers_fragments_split_out_of_a_turn(self):
+        off = self._mean(whole_turns=False, target=0)
+        on = self._mean(whole_turns=False, target=2)
+        print(f"  fragments split off:   {off:.1%} -> {on:.1%}")
+        self.assertLessEqual(on, off)
+
+    def test_correct_transcript_is_untouched(self):
+        words = [Word(w.start, w.end, w.text, speaker=self.truth[i])
+                 for i, w in enumerate(self.words)]
+        enforce_speaker_count(words, 2)
+        self.assertEqual([w.speaker for w in words], self.truth,
+                         "a hint matching reality must change nothing")
+
+    def test_hint_larger_than_reality_changes_nothing(self):
+        words = [Word(w.start, w.end, w.text, speaker=self.truth[i])
+                 for i, w in enumerate(self.words)]
+        enforce_speaker_count(words, 5)
+        self.assertEqual([w.speaker for w in words], self.truth)
+
+    def test_merges_down_to_exactly_the_requested_count(self):
+        words = [Word(i * 1.0, i * 1.0 + 0.8, f"w{i}",
+                      speaker="ABCD"[i % 4]) for i in range(40)]
+        enforce_speaker_count(words, 2)
+        self.assertEqual(len({w.speaker for w in words}), 2)
+
+    def test_a_short_interruption_folds_into_its_host(self):
+        """X X x X X — the fragment belongs to X, not to whoever is next."""
+        words = [
+            Word(0.0, 2.0, "aaa", "A"), Word(2.0, 4.0, "bbb", "A"),
+            Word(4.0, 4.3, "hm", "S0"),
+            Word(4.3, 6.0, "ccc", "A"), Word(6.0, 8.0, "ddd", "A"),
+            Word(8.0, 10.0, "eee", "B"), Word(10.0, 12.0, "fff", "B"),
+        ]
+        enforce_speaker_count(words, 2)
+        self.assertEqual(words[2].speaker, "A")
+
+    def test_zero_or_negative_target_is_a_noop(self):
+        words = [Word(0, 1, "a", "A"), Word(1, 2, "b", "B"), Word(2, 3, "c", "C")]
+        before = [w.speaker for w in words]
+        enforce_speaker_count(words, 0)
+        enforce_speaker_count(words, -1)
+        self.assertEqual([w.speaker for w in words], before)
+
+    def test_empty_input(self):
+        self.assertEqual(enforce_speaker_count([], 2), [])
 
 
 class AccuracyTest(unittest.TestCase):

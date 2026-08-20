@@ -799,12 +799,15 @@ function updateSpeakerHintNote(eng) {
   const select = $('speakersSelect');
   if (!note) return;
   if (eng && eng.supports_speaker_count === false) {
-    note.textContent = `${eng.label} has no speaker-count setting, so this is ignored. `
-      + 'AssemblyAI and ElevenLabs do use it, and it is the single biggest '
-      + 'accuracy win for diarization.';
-    note.classList.add('warn');
-    select.disabled = true;
-    select.title = `${eng.label} ignores this`;
+    // Still worth setting: the engine cannot take the hint, but the app
+    // applies it afterwards by merging any extra speakers it invented.
+    note.textContent = `${eng.label} has no speaker-count setting of its own, so this `
+      + 'is applied afterwards — extra speakers it invents get merged into '
+      + 'whoever was talking around them. AssemblyAI and ElevenLabs can also '
+      + 'use it during transcription, which works better.';
+    note.classList.remove('warn');
+    select.disabled = false;
+    select.removeAttribute('title');
   } else {
     note.textContent = 'Telling it the exact number of speakers, when you know it, '
       + 'is the single biggest accuracy win for diarization.';

@@ -80,7 +80,12 @@ A few things matter far more than which engine you pick:
 
 **Tell it how many speakers there are.** Under *Options*, set the speaker count
 if you know it. Diarizers spend most of their error budget guessing this number.
-Fixing it is the single biggest accuracy win available to you.
+
+Engines differ in what they can do with it. AssemblyAI and ElevenLabs pass it to
+their diarizer, which is the better outcome. Deepgram's API has no speaker-count
+parameter at all, so the app applies it afterwards instead, merging any extra
+speakers the engine invented into whoever was talking around them. On simulated
+over-segmentation that takes word diarization error from 15.2% to 4.7%.
 
 **Record in a quiet room, one mic, close to the speakers.** Diarization degrades
 much faster than transcription does with distance and background noise.

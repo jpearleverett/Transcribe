@@ -400,6 +400,103 @@ def _is_standalone_sentence(words: list, start: int, end: int) -> bool:
     return start == 0 or bool(SENTENCE_END.search(words[start - 1].text))
 
 
+def enforce_speaker_count(words: list, target: int) -> list:
+    """Collapse spurious speakers when the real count is known.
+
+    Diarizers over-segment: a two-person conversation comes back with a third
+    and fourth "speaker" made of fragments that actually belong to one of the
+    two. Read as a transcript, those fragments are indistinguishable from
+    ordinary misattribution — a stretch of what one person said is simply
+    labelled as somebody else.
+
+    Most engines take a speaker-count hint, but Deepgram's API has no such
+    parameter at all, so the user's answer is thrown away. Applying it here
+    makes the setting mean something on every engine.
+
+    Merging is decided by context rather than by acoustics, which we do not
+    have: for each run of a doomed speaker, look at the runs on either side. A
+    fragment sitting *inside* another speaker's turn — same speaker before and
+    after — is almost certainly theirs. Those bracketed fragments vote, and the
+    speaker with the most votes absorbs the run. With no bracketed fragments to
+    learn from, it falls back to the neighbour the speaker most often abuts.
+    """
+    if target < 1 or not words:
+        return words
+    speakers = {w.speaker for w in words if w.speaker is not None}
+    if len(speakers) <= target:
+        return words
+
+    while True:
+        runs = _speaker_runs(words)
+        present = {r[2] for r in runs}
+        if len(present) <= target:
+            break
+        # Drop the least-spoken speaker first: a genuine participant holds the
+        # floor for longer than a clustering artefact.
+        talk = {}
+        for start, end, spk in runs:
+            talk[spk] = talk.get(spk, 0.0) + (words[end - 1].end - words[start].start)
+        doomed = min(talk, key=lambda s: talk[s])
+
+        keep_durations = sorted(words[e - 1].end - words[st].start
+                                for st, e, spk in runs if spk != doomed)
+        typical_turn = (keep_durations[len(keep_durations) // 2]
+                        if keep_durations else 0.0)
+
+        votes: dict = {}
+        for i, (start, end, spk) in enumerate(runs):
+            if spk != doomed:
+                continue
+            before = runs[i - 1][2] if i > 0 else None
+            after = runs[i + 1][2] if i + 1 < len(runs) else None
+            weight = words[end - 1].end - words[start].start
+            if before is not None and before == after:
+                # Bracketed by one speaker — but that cuts two ways. A *short*
+                # fragment inside someone's turn is theirs (an interruption
+                # wrongly split off). A run the length of a whole turn, sitting
+                # between two turns by X, is somebody else's turn that got
+                # split into its own cluster — merging it into X would fuse
+                # three turns into one. Length is what separates the two.
+                if weight <= typical_turn * 0.5:
+                    votes[before] = votes.get(before, 0.0) + weight * 3.0
+                else:
+                    for other in present:
+                        if other not in (doomed, before):
+                            votes[other] = votes.get(other, 0.0) + weight * 2.0
+            else:
+                for neighbour in (before, after):
+                    if neighbour is not None and neighbour != doomed:
+                        votes[neighbour] = votes.get(neighbour, 0.0) + weight
+
+        votes.pop(doomed, None)
+        if not votes:
+            # Nothing adjacent to learn from; fold into the biggest speaker.
+            candidates = {s: t for s, t in talk.items() if s != doomed}
+            if not candidates:
+                break
+            winner = max(candidates, key=lambda s: candidates[s])
+        else:
+            winner = max(votes, key=lambda s: votes[s])
+
+        for w in words:
+            if w.speaker == doomed:
+                w.speaker = winner
+    return words
+
+
+def _speaker_runs(words: list) -> list:
+    """(start, end, speaker) for each maximal run of one speaker."""
+    runs, i = [], 0
+    while i < len(words):
+        j = i
+        while j < len(words) and words[j].speaker == words[i].speaker:
+            j += 1
+        if words[i].speaker is not None:
+            runs.append((i, j, words[i].speaker))
+        i = j
+    return runs
+
+
 # --------------------------------------------------------------------------
 # Step 3: group words into readable segments
 # --------------------------------------------------------------------------
@@ -509,6 +606,9 @@ def diarize_transcript(
         min_run_words=opts.get("min_run_words", 2),
         min_run_dur=opts.get("min_run_dur", 0.40),
     )
+    target = int(opts.get("num_speakers") or 0)
+    if target:
+        words = enforce_speaker_count(words, target)
     if opts.get("sentence_smoothing", True):
         words = smooth_sentences(
             words,

@@ -44,9 +44,9 @@ def run_job(job) -> None:
     if wanted and not engine.supports_speaker_count:
         store.add_log(
             job.id,
-            f"Note: {engine.label} has no speaker-count setting, so the "
-            f"'{wanted} speakers' hint was not used. AssemblyAI and ElevenLabs "
-            "do accept it.")
+            f"Note: {engine.label} has no speaker-count setting, so '{wanted} "
+            "speakers' cannot be passed to its diarizer. It is still applied "
+            "afterwards, by merging any extra speakers it invents.")
 
     # Probe first: duration drives every progress estimate and the UI's ETA.
     store.progress(job.id, "starting", 0.02)
@@ -103,11 +103,21 @@ def run_job(job) -> None:
         segments = result.segments
         store.add_log(job.id, "This engine returns speaker segments without word timings.")
     elif result.words:
+        wanted = int((job.options or {}).get("num_speakers") or 0)
+        before = len({w.speaker for w in result.words if w.speaker is not None})
         segments = diarize_transcript(
             result.words, result.turns,
             max_gap=cfg["max_gap"], max_dur=cfg["max_dur"], max_chars=cfg["max_chars"],
             min_run_words=cfg["min_run_words"], min_run_dur=cfg["min_run_dur"],
+            num_speakers=wanted,
         )
+        after = len({s.speaker for s in segments if s.speaker is not None})
+        if wanted and before > after:
+            store.add_log(
+                job.id,
+                f"The engine found {before} speakers; you said {wanted}, so the "
+                f"{before - after} least-spoken were merged into whoever was "
+                "talking around them.")
     else:
         # An engine that returned only plain text still deserves to be shown.
         from .align import Segment

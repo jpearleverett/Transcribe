@@ -767,9 +767,31 @@ function fillEngines(sel, value) {
   sel.value = value && state.engines.some((e) => e.name === value) ? value : (state.engines[0] || {}).name;
 }
 
+function updateSpeakerHintNote(eng) {
+  // Do not let the UI promise a setting the chosen engine cannot use.
+  const note = $('speakersNote');
+  const select = $('speakersSelect');
+  if (!note) return;
+  if (eng && eng.supports_speaker_count === false) {
+    note.textContent = `${eng.label} has no speaker-count setting, so this is ignored. `
+      + 'AssemblyAI and ElevenLabs do use it, and it is the single biggest '
+      + 'accuracy win for diarization.';
+    note.classList.add('warn');
+    select.disabled = true;
+    select.title = `${eng.label} ignores this`;
+  } else {
+    note.textContent = 'Telling it the exact number of speakers, when you know it, '
+      + 'is the single biggest accuracy win for diarization.';
+    note.classList.remove('warn');
+    select.disabled = false;
+    select.removeAttribute('title');
+  }
+}
+
 function updateEngineNote() {
   const eng = state.engines.find((e) => e.name === $('engineSelect').value);
   const note = $('engineNote');
+  updateSpeakerHintNote(eng);
   if (!eng) { note.textContent = ''; return; }
   let text = eng.description || '';
   let warn = false;

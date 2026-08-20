@@ -28,7 +28,12 @@ class Word:
     end: float
     text: str
     speaker: Optional[str] = None
-    confidence: Optional[float] = None
+    confidence: Optional[float] = None          # how sure the ASR is of the word
+    # How sure the diarizer is of the *speaker*. A different quantity entirely,
+    # and the one that matters for attribution: a perfectly transcribed word can
+    # still be handed to the wrong person. Deepgram reports it per word; other
+    # engines leave it None, in which case everything below treats it as 1.0.
+    speaker_confidence: Optional[float] = None
 
     @property
     def dur(self) -> float:
@@ -37,6 +42,13 @@ class Word:
     @property
     def mid(self) -> float:
         return (self.start + self.end) / 2.0
+
+    @property
+    def spk_conf(self) -> float:
+        """Speaker confidence, treating "unreported" as certain."""
+        if self.speaker_confidence is None:
+            return 1.0
+        return max(0.0, min(1.0, self.speaker_confidence))
 
 
 @dataclass
@@ -69,6 +81,8 @@ class Segment:
                     "text": w.text,
                     "speaker": w.speaker,
                     **({"confidence": round(w.confidence, 4)} if w.confidence is not None else {}),
+                    **({"speaker_confidence": round(w.speaker_confidence, 4)}
+                       if w.speaker_confidence is not None else {}),
                 }
                 for w in self.words
             ]
@@ -161,6 +175,56 @@ def assign_speakers(
     return words
 
 
+def resolve_low_confidence(
+    words: list,
+    *,
+    threshold: float = 0.5,
+    window: float = 4.0,
+) -> list:
+    """Re-decide words whose speaker the diarizer was unsure about.
+
+    Some engines report how confident they are in each word's *speaker*
+    separately from the word itself. Those low-confidence words are where
+    confusion errors concentrate — a diarizer that is 45% sure is essentially
+    guessing, and its guess is as likely to be wrong as right.
+
+    Where the confident words on both sides agree, we take their answer. That
+    is strictly better than a coin flip, and it leaves genuine turn changes
+    alone because those have confident words disagreeing across the boundary.
+    """
+    if not words:
+        return words
+    if all(w.speaker_confidence is None for w in words):
+        return words        # engine reports nothing to work with
+
+    confident = [i for i, w in enumerate(words) if w.spk_conf >= threshold and w.speaker]
+    if not confident:
+        return words
+
+    for i, w in enumerate(words):
+        if w.spk_conf >= threshold or not w.speaker:
+            continue
+        before = _nearest_confident(words, confident, i, -1, window)
+        after = _nearest_confident(words, confident, i, 1, window)
+        if before is not None and after is not None and before == after:
+            w.speaker = before
+    return words
+
+
+def _nearest_confident(words: list, confident: list, index: int, step: int,
+                       window: float) -> Optional[str]:
+    """The speaker of the nearest confident word within `window` seconds."""
+    i = index + step
+    while 0 <= i < len(words):
+        gap = abs(words[i].mid - words[index].mid)
+        if gap > window:
+            return None
+        if words[i].spk_conf >= 0.5 and words[i].speaker:
+            return words[i].speaker
+        i += step
+    return None
+
+
 # --------------------------------------------------------------------------
 # Step 2: smooth implausible speaker flips
 # --------------------------------------------------------------------------
@@ -230,6 +294,7 @@ def smooth_sentences(
     majority: float = 0.6,
     max_sentence_dur: float = 15.0,
     protect_run_dur: float = 1.5,
+    edge_confidence: float = 0.6,
 ) -> list:
     """Snap a sentence to its dominant speaker.
 
@@ -266,7 +331,10 @@ def smooth_sentences(
         totals: dict = {}
         for w in span:
             if w.speaker is not None:
-                totals[w.speaker] = totals.get(w.speaker, 0.0) + w.dur
+                # Weight by speaker confidence: a word the diarizer was unsure
+                # about should not anchor the whole sentence against words it
+                # was certain about. Engines reporting nothing weigh 1.0.
+                totals[w.speaker] = totals.get(w.speaker, 0.0) + w.dur * max(w.spk_conf, 0.05)
         if len(totals) < 2:
             continue
 
@@ -276,12 +344,20 @@ def smooth_sentences(
             continue
 
         for run_start, run_end in _minority_runs(span, winner):
-            # Edge runs are ambiguous; see the docstring.
-            if run_start == 0 or run_end == len(span):
+            run = span[run_start:run_end]
+            at_edge = run_start == 0 or run_end == len(span)
+            if at_edge:
+                # An edge run is normally ambiguous — as likely a real turn the
+                # punctuation lags by a word as an error. But when the engine
+                # reports how sure it was, an edge run it was *unsure* about is
+                # not ambiguous: that is the signature of a turn boundary landing
+                # a few words late, which is one of the most common diarizer
+                # errors. Confident edge runs are still left alone.
+                if min((w.spk_conf for w in run), default=1.0) >= edge_confidence:
+                    continue
+            if sum(w.dur for w in run) >= protect_run_dur:
                 continue
-            if sum(w.dur for w in span[run_start:run_end]) >= protect_run_dur:
-                continue
-            for w in span[run_start:run_end]:
+            for w in run:
                 w.speaker = winner
     return words
 
@@ -419,6 +495,11 @@ def diarize_transcript(
 ) -> list:
     """Full pipeline: attribute -> smooth -> segment."""
     words = assign_speakers(words, turns, nearest_tolerance=opts.get("nearest_tolerance", 2.0))
+    if opts.get("use_speaker_confidence", True):
+        words = resolve_low_confidence(
+            words,
+            threshold=opts.get("speaker_confidence_threshold", 0.5),
+        )
     words = smooth_speakers(
         words,
         min_run_words=opts.get("min_run_words", 2),
@@ -430,6 +511,7 @@ def diarize_transcript(
             majority=opts.get("sentence_majority", 0.6),
             max_sentence_dur=opts.get("max_sentence_dur", 15.0),
             protect_run_dur=opts.get("protect_run_dur", 1.5),
+            edge_confidence=opts.get("edge_confidence", 0.6),
         )
     return build_segments(
         words,

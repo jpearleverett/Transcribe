@@ -40,6 +40,14 @@ def run_job(job) -> None:
 
     store.add_log(job.id, f"Engine: {engine.label}")
 
+    wanted = int((job.options or {}).get("num_speakers") or 0)
+    if wanted and not engine.supports_speaker_count:
+        store.add_log(
+            job.id,
+            f"Note: {engine.label} has no speaker-count setting, so the "
+            f"'{wanted} speakers' hint was not used. AssemblyAI and ElevenLabs "
+            "do accept it.")
+
     # Probe first: duration drives every progress estimate and the UI's ETA.
     store.progress(job.id, "starting", 0.02)
     try:

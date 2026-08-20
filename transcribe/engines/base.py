@@ -103,6 +103,9 @@ class Engine:
     # Extra config this engine needs beyond an API key. Each entry names a key
     # in config.DEFAULTS and is rendered in the Settings sheet.
     config_fields: list = []
+    # Whether a speaker-count hint reaches the diarizer. Deepgram's API has no
+    # such parameter, so the app must not imply otherwise.
+    supports_speaker_count: bool = True
 
     def available(self) -> tuple:
         """Return (ok, reason). Reason is shown when ok is False."""
@@ -141,6 +144,7 @@ class Engine:
             "unavailable_reason": reason,
             "signup_url": self.signup_url,
             "key_help": self.key_help,
+            "supports_speaker_count": self.supports_speaker_count,
         }
 
 

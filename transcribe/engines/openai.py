@@ -33,6 +33,7 @@ class OpenAI(Engine):
     signup_url = "https://platform.openai.com/api-keys"
     key_help = "Uses gpt-4o-transcribe-diarize. Timestamps are per segment, not per word."
     speed_factor = 40.0
+    supports_speaker_count = False
 
     def transcribe(self, ctx: Context) -> Result:
         path = _fit_under_cap(ctx)

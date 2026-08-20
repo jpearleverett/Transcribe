@@ -44,7 +44,7 @@
           <select id="languageSelect"></select>
         </label>
         <label>Speakers
-          <select id="speakersSelect">
+          <select id="speakersSelect" aria-describedby="speakersNote">
             <option value="0">Auto-detect</option>
             <option value="1">1</option><option value="2">2</option>
             <option value="3">3</option><option value="4">4</option>
@@ -54,7 +54,7 @@
           </select>
         </label>
       </div>
-      <p class="hint small">Telling it the exact number of speakers, when you know it, is the single biggest accuracy win for diarization.</p>
+      <p class="hint small" id="speakersNote">Telling it the exact number of speakers, when you know it, is the single biggest accuracy win for diarization.</p>
     </details>
   </section>
 

@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from transcribe.align import (
     Word, Turn, assign_speakers, smooth_speakers, smooth_sentences,
+    resolve_low_confidence,
 )
 
 SENTENCES = [
@@ -120,6 +121,157 @@ def naive_segment_assignment(words, turns, truth):
         for w in blk:
             w.speaker = winner
     return wder(labelled, truth)
+
+
+def confusing_diarizer(words, truth, seed=23, error_rate=0.14, honest=True):
+    """Per-word speaker labels with confusion errors, the way Deepgram reports.
+
+    Real diarizers do not just wobble at boundaries: they hand individual words
+    to the wrong speaker outright, and — crucially — they tend to be *less
+    confident* when they do. `honest=False` models an engine whose confidence
+    tells you nothing, to check we do not make things worse for those.
+    """
+    rng = random.Random(seed)
+    out = []
+    for w, true_speaker in zip(words, truth):
+        wrong = rng.random() < error_rate
+        speaker = ("B" if true_speaker == "A" else "A") if wrong else true_speaker
+        if honest:
+            # Errors concentrate in the low-confidence band, but not perfectly:
+            # plenty of correct words are also unsure.
+            conf = rng.uniform(0.2, 0.55) if wrong else rng.uniform(0.35, 0.99)
+        else:
+            conf = rng.uniform(0.2, 0.99)
+        out.append(Word(w.start, w.end, w.text, speaker=speaker, speaker_confidence=conf))
+    return out
+
+
+def boundary_lag_diarizer(words, truth, seed=9, lag_words=3, rate=0.6):
+    """The most common real diarizer error: a turn boundary lands late.
+
+    The first few words of a turn keep the previous speaker, and the engine is
+    typically least confident exactly there. Nothing local can detect this —
+    the mislabelled words simply extend the previous run — which is why the
+    confidence signal is what makes it fixable.
+    """
+    rng = random.Random(seed)
+    starts = [i for i in range(1, len(truth)) if truth[i] != truth[i - 1]]
+    out = [Word(w.start, w.end, w.text, speaker=truth[i],
+                speaker_confidence=rng.uniform(0.75, 0.99))
+           for i, w in enumerate(words)]
+    for s in starts:
+        if rng.random() > rate:
+            continue
+        for k in range(s, min(s + rng.randint(1, lag_words), len(out))):
+            out[k].speaker = truth[s - 1]
+            out[k].speaker_confidence = rng.uniform(0.25, 0.5)
+    return out
+
+
+class ConfidenceTest(unittest.TestCase):
+    """Using the diarizer's own speaker-confidence, measured over many seeds.
+
+    Single-seed comparisons on a 66-word conversation are far too noisy to
+    judge these by — one seed showed the confidence pass making things worse
+    while the mean over 200 shows it halving the error.
+    """
+
+    SEEDS = 120
+
+    def setUp(self):
+        self.words, self.true_turns, self.truth = build_conversation()
+
+    def _mean(self, generator, resolve, edge):
+        import statistics
+        scores = []
+        for seed in range(self.SEEDS):
+            words = generator(seed)
+            if resolve:
+                resolve_low_confidence(words)
+            smooth_speakers(words)
+            smooth_sentences(words, edge_confidence=edge)
+            scores.append(wder(words, self.truth))
+        return statistics.mean(scores)
+
+    def scattered(self, seed):
+        return confusing_diarizer(self.words, self.truth, seed=seed)
+
+    def lagged(self, seed):
+        return boundary_lag_diarizer(self.words, self.truth, seed=seed)
+
+    def test_edge_confidence_fixes_boundary_lag(self):
+        off = self._mean(self.lagged, resolve=False, edge=0.0)
+        on = self._mean(self.lagged, resolve=False, edge=0.6)
+        print(f"\n  boundary lag: {off:.1%} -> {on:.1%} with edge confidence")
+        self.assertLess(on, off * 0.6,
+                        "confidence-aware sentence edges should cut this sharply")
+
+    def test_confidence_pass_helps_on_scattered_errors(self):
+        off = self._mean(self.scattered, resolve=False, edge=0.6)
+        on = self._mean(self.scattered, resolve=True, edge=0.6)
+        print(f"  scattered noise: {off:.1%} -> {on:.1%} with the confidence pass")
+        self.assertLess(on, off,
+                        "re-deciding low-confidence words should help on average")
+
+    def test_full_stack_beats_the_old_behaviour(self):
+        for name, gen in (("scattered", self.scattered), ("lagged", self.lagged)):
+            old = self._mean(gen, resolve=False, edge=0.0)
+            new = self._mean(gen, resolve=True, edge=0.6)
+            print(f"  {name}: {old:.1%} -> {new:.1%}")
+            self.assertLess(new, old * 0.75, f"{name} should improve materially")
+
+    def test_engines_reporting_nothing_are_untouched(self):
+        words = [Word(0.0, 0.5, "a", "A"), Word(0.6, 1.1, "b", "B")]
+        before = [w.speaker for w in words]
+        resolve_low_confidence(words)
+        self.assertEqual([w.speaker for w in words], before)
+
+    def test_no_confidence_means_edges_stay_protected(self):
+        """Engines without a confidence signal keep the conservative behaviour."""
+        words = [
+            Word(0.0, 1.0, "One", "A"),
+            Word(1.0, 1.4, "two", "B"), Word(1.4, 2.4, "three.", "B"),
+        ]
+        smooth_sentences(words, edge_confidence=0.6)
+        self.assertEqual(words[0].speaker, "A",
+                         "an edge run with no confidence reported is still ambiguous")
+
+    def test_confident_edge_runs_are_still_protected(self):
+        """A real one-word turn the engine was sure about must survive."""
+        words = [
+            Word(0.0, 0.9, "Right.", "A", speaker_confidence=0.97),
+            Word(1.0, 1.4, "So", "B", speaker_confidence=0.95),
+            Word(1.4, 2.4, "anyway.", "B", speaker_confidence=0.95),
+        ]
+        smooth_sentences(words, edge_confidence=0.6)
+        self.assertEqual(words[0].speaker, "A")
+
+    def test_only_flips_when_both_neighbours_agree(self):
+        words = [
+            Word(0.0, 0.4, "one", "A", speaker_confidence=0.95),
+            Word(0.5, 0.9, "two", "B", speaker_confidence=0.30),
+            Word(1.0, 1.4, "three", "A", speaker_confidence=0.95),
+        ]
+        resolve_low_confidence(words)
+        self.assertEqual(words[1].speaker, "A")
+
+        words = [
+            Word(0.0, 0.4, "one", "A", speaker_confidence=0.95),
+            Word(0.5, 0.9, "two", "A", speaker_confidence=0.30),
+            Word(1.0, 1.4, "three", "B", speaker_confidence=0.95),
+        ]
+        resolve_low_confidence(words)
+        self.assertEqual(words[1].speaker, "A",
+                         "neighbours disagree at a real boundary; leave it")
+
+    def test_distant_neighbours_are_not_consulted(self):
+        words = [
+            Word(0.0, 0.4, "one", "A", speaker_confidence=0.95),
+            Word(30.0, 30.4, "two", "B", speaker_confidence=0.20),
+            Word(60.0, 60.4, "three", "A", speaker_confidence=0.95),
+        ]
+        resolve_low_confidence(words, window=4.0)
+        self.assertEqual(words[1].speaker, "B", "half a minute away is not context")
 
 
 class AccuracyTest(unittest.TestCase):

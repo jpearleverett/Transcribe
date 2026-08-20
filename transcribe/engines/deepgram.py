@@ -40,6 +40,9 @@ class Deepgram(Engine):
     signup_url = "https://console.deepgram.com/signup"
     key_help = "Deepgram gives $200 of free credit on signup — enough for hundreds of hours."
     speed_factor = 90.0
+    # Deepgram's diarizer takes no speaker-count hint of any kind — there is no
+    # num_speakers, min/max, or equivalent parameter on /v1/listen.
+    supports_speaker_count = False
 
     def transcribe(self, ctx: Context) -> Result:
         path = _upload_copy(ctx)
@@ -91,6 +94,10 @@ class Deepgram(Engine):
                 text=text,
                 speaker=normalize_speaker(w.get("speaker")),
                 confidence=w.get("confidence"),
+                # Reported per word on pre-recorded audio, and distinct from
+                # `confidence`: this is how sure the diarizer is of the
+                # *speaker*, which is what attribution errors turn on.
+                speaker_confidence=w.get("speaker_confidence"),
             ))
 
         if not words and not (alt.get("transcript") or "").strip():
@@ -99,6 +106,12 @@ class Deepgram(Engine):
         if words and not any(w.speaker is not None for w in words):
             ctx.log("Deepgram returned no speaker labels for this recording — "
                     "the whole transcript will show as one speaker.")
+
+        scored = [w for w in words if w.speaker_confidence is not None]
+        if scored:
+            shaky = sum(1 for w in scored if w.speaker_confidence < 0.5)
+            ctx.log(f"Diarizer was unsure of the speaker on {shaky} of {len(scored)} words"
+                    f" ({shaky / len(scored):.0%}); those are re-decided from their neighbours.")
 
         detected = ""
         try:

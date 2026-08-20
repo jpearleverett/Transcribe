@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.egg-info/
+.venv/
+# Never commit local state — it holds API keys and recordings.
+.transcribe/
+config.json

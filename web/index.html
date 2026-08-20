@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#0d1117">
+<title>Transcribe</title>
+<link rel="stylesheet" href="/static/styles.css">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="topbar">
+  <button class="icon-btn back-btn" id="backBtn" hidden aria-label="Back to list">&#8592;</button>
+  <h1 id="title">Transcribe</h1>
+  <button class="icon-btn" id="settingsBtn" aria-label="Settings">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 15.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5m7.43-2.53a7.6 7.6 0 0 0 0-1.94l2.03-1.58a.5.5 0 0 0 .12-.62l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.3 7.3 0 0 0-1.68-.97l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.6.24-1.16.57-1.68.97l-2.39-.96a.5.5 0 0 0-.6.22L2.42 8.83a.5.5 0 0 0 .12.62l2.03 1.58a7.6 7.6 0 0 0 0 1.94l-2.03 1.58a.5.5 0 0 0-.12.62l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.52.4 1.08.73 1.68.97l.36 2.54a.5.5 0 0 0 .5.42h3.84a.5.5 0 0 0 .5-.42l.36-2.54c.6-.24 1.16-.57 1.68-.97l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.62Z"/></svg>
+  </button>
+</header>
+
+<!-- ============ LIST VIEW ============ -->
+<main id="listView" class="view">
+  <section class="uploader" id="dropZone">
+    <input type="file" id="fileInput" accept="audio/*,video/*,.m4a,.mp3,.wav,.ogg,.opus,.oga,.amr,.3gp,.aac,.flac,.mp4,.webm,.mkv,.mov,.wma,.aiff,.caf" hidden>
+    <button class="pick-btn" id="pickBtn">
+      <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3m7 9a7 7 0 0 1-6 6.92V22h-2v-3.08A7 7 0 0 1 5 12h2a5 5 0 0 0 10 0Z"/></svg>
+      <span>Choose an audio file</span>
+    </button>
+    <p class="hint" id="uploadHint">Recordings, voice memos, meetings, interviews &mdash; up to a few hours.</p>
+
+    <div class="engine-row">
+      <label for="engineSelect">Engine</label>
+      <select id="engineSelect"></select>
+      <button class="link-btn" id="engineConfigBtn" hidden>Set up</button>
+    </div>
+    <div class="engine-note" id="engineNote"></div>
+
+    <details class="advanced" id="advanced">
+      <summary>Options</summary>
+      <div class="adv-grid">
+        <label>Language
+          <select id="languageSelect"></select>
+        </label>
+        <label>Speakers
+          <select id="speakersSelect">
+            <option value="0">Auto-detect</option>
+            <option value="1">1</option><option value="2">2</option>
+            <option value="3">3</option><option value="4">4</option>
+            <option value="5">5</option><option value="6">6</option>
+            <option value="7">7</option><option value="8">8</option>
+            <option value="9">9</option><option value="10">10</option>
+          </select>
+        </label>
+      </div>
+      <p class="hint small">Telling it the exact number of speakers, when you know it, is the single biggest accuracy win for diarization.</p>
+    </details>
+  </section>
+
+  <div class="upload-progress" id="uploadProgress" hidden>
+    <div class="up-label"><span id="upName">Uploading…</span><span id="upPct">0%</span></div>
+    <div class="bar"><div class="bar-fill" id="upBar"></div></div>
+    <button class="link-btn danger" id="upCancel">Cancel</button>
+  </div>
+
+  <section class="jobs">
+    <h2 class="section-title">Transcripts</h2>
+    <div id="jobList" class="job-list"></div>
+    <p class="empty" id="emptyState">Nothing yet. Pick a file above to get started.</p>
+  </section>
+</main>
+
+<!-- ============ TRANSCRIPT VIEW ============ -->
+<main id="detailView" class="view" hidden>
+  <div class="detail-head">
+    <div class="meta" id="detailMeta"></div>
+    <div class="speaker-chips" id="speakerChips"></div>
+  </div>
+
+  <div class="progress-panel" id="progressPanel" hidden>
+    <div class="stage-row"><span id="stageLabel">Working…</span><span id="stagePct"></span></div>
+    <div class="bar"><div class="bar-fill" id="stageBar"></div></div>
+    <p class="hint small" id="stageHint">You can lock your phone or switch apps &mdash; this keeps running in Termux.</p>
+    <details class="log-details"><summary>Details</summary><pre class="log" id="jobLog"></pre></details>
+    <button class="link-btn danger" id="cancelJobBtn">Cancel</button>
+  </div>
+
+  <div class="error-panel" id="errorPanel" hidden>
+    <strong>That didn't work</strong>
+    <p id="errorText"></p>
+    <button class="btn" id="retryBtn">Retry</button>
+  </div>
+
+  <div class="toolbar" id="toolbar" hidden>
+    <input type="search" id="searchInput" placeholder="Search transcript" aria-label="Search transcript">
+    <button class="icon-btn" id="copyBtn" aria-label="Copy transcript" title="Copy">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12Zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Z"/></svg>
+    </button>
+    <div class="menu-wrap">
+      <button class="icon-btn" id="exportBtn" aria-label="Export" title="Export">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M5 20h14v-2H5Zm7-16-5.5 5.5 1.42 1.42L11 7.83V16h2V7.83l3.08 3.09L17.5 9.5Z"/></svg>
+      </button>
+      <div class="menu" id="exportMenu" hidden>
+        <button data-fmt="txt">Plain text</button>
+        <button data-fmt="md">Markdown</button>
+        <button data-fmt="srt">SRT subtitles</button>
+        <button data-fmt="vtt">WebVTT</button>
+        <button data-fmt="csv">CSV</button>
+        <button data-fmt="json">JSON (with word timings)</button>
+      </div>
+    </div>
+    <div class="menu-wrap">
+      <button class="icon-btn" id="moreBtn" aria-label="More" title="More">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle fill="currentColor" cx="12" cy="5" r="2"/><circle fill="currentColor" cx="12" cy="12" r="2"/><circle fill="currentColor" cx="12" cy="19" r="2"/></svg>
+      </button>
+      <div class="menu" id="moreMenu" hidden>
+        <button id="toggleTimestamps">Hide timestamps</button>
+        <button id="toggleMerge">Split into short segments</button>
+        <button id="renameJobBtn">Rename</button>
+        <button id="deleteJobBtn" class="danger">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="transcript" class="transcript" aria-live="polite"></div>
+  <p class="empty" id="noMatches" hidden>No matches.</p>
+</main>
+
+<!-- sticky player -->
+<div class="player" id="player" hidden>
+  <button class="play-btn" id="playBtn" aria-label="Play">
+    <svg id="playIcon" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+  </button>
+  <input type="range" id="seek" min="0" max="1000" value="0" step="1" aria-label="Seek">
+  <span class="time" id="timeLabel">0:00</span>
+  <button class="rate-btn" id="rateBtn" aria-label="Playback speed">1&times;</button>
+  <audio id="audio" preload="metadata"></audio>
+</div>
+
+<!-- ============ SETTINGS ============ -->
+<dialog id="settingsDialog" class="sheet">
+  <form method="dialog" class="sheet-inner" id="settingsForm">
+    <header class="sheet-head"><h2>Settings</h2><button class="icon-btn" value="cancel" aria-label="Close">&times;</button></header>
+
+    <label class="field">Default engine
+      <select id="setEngine"></select>
+    </label>
+    <p class="hint small" id="setEngineNote"></p>
+
+    <div id="keyFields"></div>
+
+    <label class="field">Language
+      <select id="setLanguage"></select>
+    </label>
+
+    <details class="advanced">
+      <summary>Transcript shaping</summary>
+      <div class="adv-grid">
+        <label>Max segment seconds <input type="number" id="setMaxDur" min="5" max="120" step="1"></label>
+        <label>Split after silence (s) <input type="number" id="setMaxGap" min="0.2" max="5" step="0.1"></label>
+      </div>
+      <p class="hint small">Shorter segments suit subtitles; longer ones read better as a document.</p>
+    </details>
+
+    <div class="sheet-actions">
+      <button class="btn ghost" value="cancel">Cancel</button>
+      <button class="btn" id="saveSettings" value="save">Save</button>
+    </div>
+    <p class="version" id="serverInfo"></p>
+  </form>
+</dialog>
+
+<dialog id="promptDialog" class="sheet">
+  <form method="dialog" class="sheet-inner">
+    <header class="sheet-head"><h2 id="promptTitle">Rename</h2><button class="icon-btn" value="cancel" aria-label="Close">&times;</button></header>
+    <label class="field"><span id="promptLabel">Name</span>
+      <input type="text" id="promptInput" autocomplete="off">
+    </label>
+    <div class="sheet-actions">
+      <button class="btn ghost" value="cancel">Cancel</button>
+      <button class="btn" value="ok">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

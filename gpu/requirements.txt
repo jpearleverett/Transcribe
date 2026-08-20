@@ -1,0 +1,8 @@
+# Pinned deliberately: CTranslate2 and cuDNN are the pairing that breaks most
+# often, and an unpinned rebuild months from now should still produce a working
+# image.
+runpod==1.7.9
+faster-whisper==1.2.1
+ctranslate2==4.8.1
+pyannote.audio==4.0.7
+huggingface-hub>=0.28

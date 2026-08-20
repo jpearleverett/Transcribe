@@ -30,8 +30,24 @@ docker push YOUR_DOCKERHUB_USER/transcribe-worker:1
 
 The build bakes ~3 GB of weights into the image on purpose: a cold start that
 has to pull them from Hugging Face is the slowest part of serverless GPU work.
+To skip that and have the worker fetch them on first use instead — a much
+faster build and a smaller image, at the cost of a slow first request:
+
+```bash
+docker build --build-arg SKIP_PREFETCH=1 -t you/transcribe-worker:1 .
+```
 
 Building on a machine without a GPU is fine — `prefetch.py` downloads on CPU.
+
+**On the CUDA version:** the image is pinned to CUDA 12.6 rather than 12.4 for
+a specific reason. pyannote.audio 4.x requires torch ≥ 2.8, and PyTorch's cu124
+wheel index stops at torch 2.6 — so a 12.4 image cannot satisfy the diarizer at
+all. CTranslate2 also links against cuDNN 9, which this base image provides. If
+you change either pin, check both constraints still hold.
+
+The dependency set has been verified to install: torch 2.8.0+cu126,
+torchaudio 2.8.0+cu126, torchcodec 0.7.0, pyannote.audio 4.0.7,
+faster-whisper 1.2.1, ctranslate2 4.8.1.
 
 ## 3. Create the RunPod endpoint
 

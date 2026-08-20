@@ -703,6 +703,32 @@ $('toggleMerge').addEventListener('click', () => {
   refreshDetail(state.current);
 });
 
+$('rerunBtn').addEventListener('click', async () => {
+  const job = state.jobs.get(state.current);
+  // Only engines that are actually ready, and not the one already used.
+  const options = state.engines.filter((e) =>
+    e.available && (e.has_key || !e.needs_key) && e.name !== 'mock' && e.name !== (job && job.engine));
+  if (!options.length) {
+    toast('No other engine is set up yet — add a key in Settings.');
+    return;
+  }
+  const labels = options.map((e, i) => `${i + 1}. ${e.label}`).join('\n');
+  const pick = await ask('Re-run with another engine',
+                         `The same audio, a second opinion:\n${labels}\n\nEnter a number`, '1');
+  const idx = parseInt(pick, 10) - 1;
+  if (!(idx >= 0 && idx < options.length)) return;
+  try {
+    const data = await api(`/api/jobs/${state.current}/rerun`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ engine: options[idx].name }),
+    });
+    applyJob(data.job);
+    openJob(data.job.id);
+    toast(`Re-running with ${options[idx].label}`);
+  } catch (e) { toast(e.message); }
+});
+
 $('renameJobBtn').addEventListener('click', async () => {
   const job = state.jobs.get(state.current);
   const name = await ask('Rename', 'Transcript name', job ? job.name : '');

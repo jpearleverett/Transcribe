@@ -197,29 +197,33 @@ def resolve_low_confidence(
     if all(w.speaker_confidence is None for w in words):
         return words        # engine reports nothing to work with
 
-    confident = [i for i, w in enumerate(words) if w.spk_conf >= threshold and w.speaker]
-    if not confident:
-        return words
+    if not any(w.spk_conf >= threshold and w.speaker for w in words):
+        return words        # nothing confident enough to reason from
 
     for i, w in enumerate(words):
         if w.spk_conf >= threshold or not w.speaker:
             continue
-        before = _nearest_confident(words, confident, i, -1, window)
-        after = _nearest_confident(words, confident, i, 1, window)
+        before = _nearest_confident(words, i, -1, window, threshold)
+        after = _nearest_confident(words, i, 1, window, threshold)
         if before is not None and after is not None and before == after:
             w.speaker = before
     return words
 
 
-def _nearest_confident(words: list, confident: list, index: int, step: int,
-                       window: float) -> Optional[str]:
-    """The speaker of the nearest confident word within `window` seconds."""
+def _nearest_confident(words: list, index: int, step: int, window: float,
+                       threshold: float) -> Optional[str]:
+    """The speaker of the nearest confident word within `window` seconds.
+
+    `threshold` is passed through rather than hardcoded: the caller decides
+    what counts as confident, and having the two halves of this decision use
+    different cutoffs would make the pass behave incoherently at any setting
+    other than the default.
+    """
     i = index + step
     while 0 <= i < len(words):
-        gap = abs(words[i].mid - words[index].mid)
-        if gap > window:
+        if abs(words[i].mid - words[index].mid) > window:
             return None
-        if words[i].spk_conf >= 0.5 and words[i].speaker:
+        if words[i].spk_conf >= threshold and words[i].speaker:
             return words[i].speaker
         i += step
     return None

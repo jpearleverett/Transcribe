@@ -12,6 +12,7 @@ import mimetypes
 import os
 import posixpath
 import queue
+import shutil
 import re
 import secrets
 import socket
@@ -328,6 +329,50 @@ class Handler(BaseHTTPRequestHandler):
 
         if action == "cancel" and method == "POST":
             return self.json({"ok": store.cancel(job_id)})
+
+        if action == "rerun" and method == "POST":
+            # Re-run the same audio through a different engine, as a NEW job so
+            # the two can be compared side by side. Vendor diarization
+            # benchmarks contradict each other, so the only reliable comparison
+            # is on your own recording.
+            if not job.audio_file or not Path(job.audio_file).exists():
+                return self.fail("The original audio is gone, so this can't be re-run.")
+            body = self.read_json()
+            engine_name = str(body.get("engine") or "").strip()
+            try:
+                engine = engines.get(engine_name)
+            except engines.EngineError as e:
+                return self.fail(str(e))
+            ok, reason = engine.available()
+            if not ok:
+                return self.fail(reason or f"{engine.label} is not available.")
+            if engine.needs_key and not engine.has_key():
+                return self.fail(f"{engine.label} needs an API key. Add one in Settings.")
+
+            # Copy the audio so deleting either job leaves the other playable.
+            src = Path(job.audio_file)
+            dest = config.UPLOAD_DIR / f"{int(time.time())}-{secrets.token_hex(4)}-{src.name.split('-', 2)[-1]}"
+            try:
+                shutil.copy2(src, dest)
+            except OSError as e:
+                return self.fail(f"Could not copy the audio: {e}", 507)
+
+            opts = dict(job.options or {})
+            if "num_speakers" in body:
+                opts["num_speakers"] = _int(body.get("num_speakers"), 0)
+            new_job = store.create(
+                name=f"{job.name} · {engine.label}",
+                engine=engine_name,
+                language=job.language,
+                size=job.size,
+                duration=job.duration,
+                audio_file=str(dest),
+                media_type=job.media_type,
+                options=opts,
+                speakers=dict(job.speakers or {}),
+            )
+            store.enqueue(new_job.id)
+            return self.json({"job": new_job.public()}, 201)
 
         if action == "retry" and method == "POST":
             if not job.audio_file or not Path(job.audio_file).exists():

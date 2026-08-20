@@ -264,6 +264,36 @@ class ConfidenceTest(unittest.TestCase):
         self.assertEqual(words[1].speaker, "A",
                          "neighbours disagree at a real boundary; leave it")
 
+    def test_threshold_is_honoured_end_to_end(self):
+        """Both halves of the decision must use the caller's threshold.
+
+        A hardcoded cutoff inside the neighbour search would make the pass
+        incoherent at any setting other than the default: a word could be
+        treated as unsure when selecting it, then as confident when it is
+        someone else's neighbour.
+        """
+        def build():
+            return [
+                Word(0.0, 0.4, "one", "A", speaker_confidence=0.62),
+                Word(0.5, 0.9, "two", "B", speaker_confidence=0.55),
+                Word(1.0, 1.4, "three", "A", speaker_confidence=0.62),
+            ]
+
+        # At 0.5 nothing is unsure, so nothing moves.
+        low = build()
+        resolve_low_confidence(low, threshold=0.5)
+        self.assertEqual([w.speaker for w in low], ["A", "B", "A"])
+
+        # At 0.6 the middle word is unsure and its neighbours are confident.
+        high = build()
+        resolve_low_confidence(high, threshold=0.6)
+        self.assertEqual([w.speaker for w in high], ["A", "A", "A"])
+
+        # At 0.7 the neighbours are unsure too, so there is nothing to trust.
+        higher = build()
+        resolve_low_confidence(higher, threshold=0.7)
+        self.assertEqual([w.speaker for w in higher], ["A", "B", "A"])
+
     def test_distant_neighbours_are_not_consulted(self):
         words = [
             Word(0.0, 0.4, "one", "A", speaker_confidence=0.95),

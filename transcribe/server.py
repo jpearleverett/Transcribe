@@ -106,6 +106,32 @@ class Handler(BaseHTTPRequestHandler):
         q = urllib.parse.urlparse(self.path).query
         return {k: v[0] for k, v in urllib.parse.parse_qs(q).items()}
 
+    def same_origin(self) -> bool:
+        """Reject cross-site state-changing requests.
+
+        The server listens on loopback, but any web page the user opens in the
+        same browser can still reach it: a cross-origin `fetch` to
+        http://127.0.0.1:8756 has its *response* hidden by CORS, yet the request
+        is still delivered and the side effect still happens. So a page could
+        silently DELETE transcripts or rewrite settings.
+
+        Chrome sends `Origin` on cross-origin requests and on same-origin
+        non-GET fetches, so requiring it to match the Host we were addressed by
+        blocks that while leaving curl (which sends no Origin) working.
+        """
+        origin = self.headers.get("Origin")
+        if not origin:
+            # No Origin: not a browser fetch. Sec-Fetch-Site still catches the
+            # form-submission case, where Chrome omits Origin for some methods.
+            return self.headers.get("Sec-Fetch-Site", "same-origin") in (
+                "same-origin", "same-site", "none")
+        host = self.headers.get("Host", "")
+        try:
+            parsed = urllib.parse.urlparse(origin)
+        except ValueError:
+            return False
+        return bool(host) and parsed.netloc == host
+
     def authorized(self) -> bool:
         if not AUTH_TOKEN:
             return True
@@ -145,6 +171,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             return self.fail_unread(
                 "Not authorised. Open the link printed by the server, including its ?token=.", 401)
+
+        if method in ("POST", "PATCH", "DELETE") and not self.same_origin():
+            return self.fail_unread(
+                "Blocked a cross-site request. Open the app directly rather than "
+                "letting another page talk to it.", 403)
 
         try:
             if path == "/" or path == "/index.html":

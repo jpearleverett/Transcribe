@@ -518,6 +518,40 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(Path(jobs_mod.store().get(job_id).audio_file).exists())
         jobs_mod.store().delete(job_id)
 
+    def test_18k_cross_site_writes_are_blocked(self):
+        """Any page in the same browser can reach a loopback server."""
+        created = self.upload(name="csrf-target.wav")
+        job_id = created["job"]["id"]
+        self.wait_for(job_id)
+
+        for origin in ("https://evil.example", "http://localhost:1234"):
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                self.req(f"/api/jobs/{job_id}", "DELETE", headers={"Origin": origin})
+            self.assertEqual(cm.exception.code, 403, origin)
+        self.assertIsNotNone(jobs_mod.store().get(job_id), "the job must survive")
+
+        # The app's own origin still works.
+        own = f"http://127.0.0.1:{self.port}"
+        data = self.req(f"/api/jobs/{job_id}", "PATCH",
+                        json.dumps({"name": "renamed"}).encode(),
+                        {"Content-Type": "application/json", "Origin": own})
+        self.assertEqual(data["job"]["name"], "renamed")
+
+        # And a form-style cross-site POST with no Origin is caught too.
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self.req(f"/api/jobs/{job_id}", "DELETE",
+                     headers={"Sec-Fetch-Site": "cross-site"})
+        self.assertEqual(cm.exception.code, 403)
+
+        # curl, which sends neither header, is unaffected.
+        self.req(f"/api/jobs/{job_id}", "DELETE")
+        self.assertIsNone(jobs_mod.store().get(job_id))
+
+    def test_18l_reads_are_not_blocked(self):
+        """GET must stay open: blocking it would break nothing and help nobody."""
+        data = self.req("/api/health", headers={"Origin": "https://evil.example"})
+        self.assertTrue(data["ok"])
+
     def test_19_health(self):
         data = self.req("/api/health")
         self.assertTrue(data["ok"])

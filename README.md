@@ -243,7 +243,7 @@ transcribe/          the server
 web/                 the front end (no build step, no framework)
 gpu/                 the RunPod GPU worker
 tools/               diarize_sherpa.py — offline diarization helper
-tests/               144 tests, no network needed
+tests/               146 tests, no network needed
 ```
 
 Run the tests with `python3 -m unittest discover -s tests`.
@@ -290,3 +290,9 @@ Settings says when a key came from the environment rather than from you.
 
 Uploaded audio stays in `~/.transcribe/uploads` so the player can seek through
 it. Deleting a transcript deletes its audio.
+
+The server binds to loopback only unless you pass `--lan`, and it refuses
+cross-site POST/PATCH/DELETE requests. That matters more than it sounds: a
+loopback server is reachable from any page open in the same browser, and while
+CORS hides the *response* from that page, the request still lands — so without
+the check, a website you visited could quietly delete your transcripts.

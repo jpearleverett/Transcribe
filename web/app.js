@@ -27,6 +27,8 @@ const state = {
   merged: true,
   search: '',
   activeSegment: -1,
+  activeEl: null,      // cached DOM node for the active segment
+  activeWords: [],     // its word spans, cached alongside
   upload: null,        // in-flight XMLHttpRequest
 };
 
@@ -106,8 +108,10 @@ function ask(title, label, value) {
 let es = null;
 let pollTimer = null;
 let sseFailures = 0;
+let reconnectTimer = null;
 
 function connectLive() {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   if (es) { es.close(); es = null; }
   try {
     es = new EventSource('/api/events');
@@ -137,8 +141,14 @@ function connectLive() {
     sseFailures++;
     if (es) { es.close(); es = null; }
     startPolling();
+    // One pending reconnect at a time: without this, every error queues another
+    // timer and a flapping connection turns into a burst of reconnects.
+    if (reconnectTimer) return;
     const delay = Math.min(1000 * Math.pow(2, Math.min(sseFailures, 5)), 30000);
-    setTimeout(() => { if (!document.hidden) connectLive(); }, delay);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (!document.hidden) connectLive();
+    }, delay);
   };
 }
 
@@ -459,6 +469,10 @@ async function renameSpeaker(label) {
 
 function renderTranscript() {
   const box = $('transcript');
+  // The cached nodes are about to be replaced.
+  state.activeSegment = -1;
+  state.activeEl = null;
+  state.activeWords = [];
   box.innerHTML = '';
   box.classList.toggle('hide-times', !state.showTimestamps);
   const segs = (state.result && state.result.segments) || [];
@@ -600,26 +614,25 @@ function highlight(t) {
   if (idx < 0 || idx >= segs.length || t < segs[idx].start || t > segs[idx].end) {
     idx = binarySearchSegment(segs, t);
   }
+
   if (idx !== state.activeSegment) {
-    document.querySelectorAll('.seg.active').forEach((el) => el.classList.remove('active'));
+    if (state.activeEl) state.activeEl.classList.remove('active');
     state.activeSegment = idx;
-    if (idx >= 0) {
-      const el = document.querySelector(`.seg[data-index="${idx}"]`);
-      if (el) {
-        el.classList.add('active');
-        const r = el.getBoundingClientRect();
-        if (r.top < 70 || r.bottom > window.innerHeight - 90) {
-          el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-        }
+    // Cache the element and its word spans. This runs on every animation
+    // frame, and re-querying the document 60 times a second over a transcript
+    // with thousands of nodes is what makes long recordings feel sluggish.
+    state.activeEl = idx >= 0 ? document.querySelector(`.seg[data-index="${idx}"]`) : null;
+    state.activeWords = state.activeEl ? [...state.activeEl.querySelectorAll('.w')] : [];
+    if (state.activeEl) {
+      state.activeEl.classList.add('active');
+      const r = state.activeEl.getBoundingClientRect();
+      if (r.top < 70 || r.bottom > window.innerHeight - 90) {
+        state.activeEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
       }
     }
   }
-  if (idx < 0) return;
-  const el = document.querySelector(`.seg[data-index="${idx}"]`);
-  if (!el) return;
-  const words = el.querySelectorAll('.w');
-  if (!words.length) return;
-  for (const w of words) {
+
+  for (const w of state.activeWords) {
     const on = t >= parseFloat(w.dataset.s) && t <= parseFloat(w.dataset.e);
     if (on !== w.classList.contains('active')) w.classList.toggle('active', on);
   }
@@ -642,6 +655,8 @@ function stopAudio() {
   audio.load();
   cancelAnimationFrame(rafId);
   state.activeSegment = -1;
+  state.activeEl = null;
+  state.activeWords = [];
 }
 
 /* ------------------------------------------------------------------ *
@@ -747,7 +762,7 @@ function fillLanguages(sel, value) {
 function fillEngines(sel, value) {
   sel.innerHTML = state.engines.map((e) => {
     const warn = e.needs_key && !e.has_key ? ' — needs key' : (e.available ? '' : ' — unavailable');
-    return `<option value="${e.name}">${esc(e.label)}${esc(warn)}</option>`;
+    return `<option value="${esc(e.name)}">${esc(e.label)}${esc(warn)}</option>`;
   }).join('');
   sel.value = value && state.engines.some((e) => e.name === value) ? value : (state.engines[0] || {}).name;
 }

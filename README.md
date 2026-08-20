@@ -191,8 +191,10 @@ boundary goes to whichever side holds more of it. Words landing in a diarizer's
 gap fall back to the nearest turn.
 
 **2. Run-length smoothing.** A run that is short in *both* time and word count,
-with the same speaker on both sides, is absorbed. A genuine one-word turn
-("Exactly.") is longer than the threshold and survives.
+with the same speaker on both sides, is absorbed — that combination is
+overwhelmingly a diarizer boundary error. A run forming a complete sentence of
+its own ("Right.") is kept regardless of length, because those are real
+interjections and are frequently under 200 ms.
 
 **3. Sentence-scoped majority vote.** Within each `.?!`-delimited sentence, if
 one speaker holds 60% of the talk time, stray words are snapped to them — real
@@ -203,6 +205,19 @@ just as likely a real turn the punctuation lags by a word).
 
 See [`transcribe/align.py`](transcribe/align.py). It is the part most worth
 reading, and `tests/test_align.py` covers each of these cases.
+
+**Does it actually help?** `tests/test_accuracy.py` builds a synthetic
+conversation with known ground truth, runs a diarizer simulation that jitters
+turn boundaries and drops short turns the way real ones do, and measures word
+diarization error rate:
+
+| Method | WDER |
+|---|---|
+| Naive segment-level majority | 36.4% |
+| This pipeline | 1.5% |
+
+With an exact diarization timeline the pipeline is lossless (0% WDER), and it
+holds under ±0.8 s of boundary jitter at 6.1%.
 
 ---
 
@@ -221,7 +236,7 @@ transcribe/          the server
 web/                 the front end (no build step, no framework)
 gpu/                 the RunPod GPU worker
 tools/               diarize_sherpa.py — offline diarization helper
-tests/               97 tests, no network needed
+tests/               101 tests, no network needed
 ```
 
 Run the tests with `python3 -m unittest discover -s tests`.

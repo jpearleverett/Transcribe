@@ -171,12 +171,18 @@ def smooth_speakers(
     min_run_words: int = 2,
     min_run_dur: float = 0.40,
 ) -> list:
-    """Absorb single-word speaker flips surrounded by one other speaker.
+    """Absorb short speaker flips surrounded by one other speaker.
 
-    A genuine one-word turn ("Right." "Exactly.") is real and worth keeping, so
-    we only absorb a run when it is *both* short in words and short in time and
-    the same speaker holds the floor on both sides. That combination is
-    overwhelmingly a boundary error rather than a real interjection.
+    A run is only absorbed when it is short in words, short in time, and has the
+    same speaker on both sides — that combination is overwhelmingly a diarizer
+    boundary error.
+
+    The exception that matters: a run forming a *complete sentence* of its own
+    ("Right." "Exactly.") is a real interjection, and those are frequently under
+    both thresholds — "Right." is often less than 200 ms. Absorbing them would
+    silently delete exactly the short turns that per-word attribution exists to
+    capture, so a run bounded by sentence punctuation on both sides is kept
+    regardless of how brief it is.
     """
     if len(words) < 3:
         return words
@@ -197,6 +203,8 @@ def smooth_speakers(
             s, e, spk = runs[k]
             prev_spk, next_spk = runs[k - 1][2], runs[k + 1][2]
             if prev_spk != next_spk or prev_spk == spk:
+                continue
+            if _is_standalone_sentence(words, s, e):
                 continue
             n_words = e - s
             dur = words[e - 1].end - words[s].start
@@ -303,6 +311,13 @@ def _minority_runs(span: list, winner) -> list:
     if start is not None:
         runs.append((start, len(span)))
     return runs
+
+
+def _is_standalone_sentence(words: list, start: int, end: int) -> bool:
+    """True when words[start:end] is exactly one or more whole sentences."""
+    if end <= start or not SENTENCE_END.search(words[end - 1].text):
+        return False
+    return start == 0 or bool(SENTENCE_END.search(words[start - 1].text))
 
 
 # --------------------------------------------------------------------------

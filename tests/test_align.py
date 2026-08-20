@@ -102,6 +102,36 @@ class TestSmooth(unittest.TestCase):
         smooth_speakers(words)
         self.assertEqual([w.speaker for w in words][1:4], ["B", "B", "B"])
 
+    def test_standalone_short_sentence_survives(self):
+        # "Right." is a real one-word turn and is often under 200ms — exactly
+        # the interjection per-word attribution exists to capture.
+        words = [
+            W(0.0, 0.6, "everyone.", "B"),
+            W(0.7, 0.88, "Right.", "A"),
+            W(1.0, 1.6, "Exactly.", "B"),
+        ]
+        smooth_speakers(words)
+        self.assertEqual([w.speaker for w in words], ["B", "A", "B"])
+
+    def test_mid_sentence_short_flip_still_absorbed(self):
+        # Same length, but not a sentence of its own: still a boundary error.
+        words = [
+            W(0.0, 0.6, "everyone", "B"),
+            W(0.7, 0.88, "right", "A"),
+            W(1.0, 1.6, "exactly", "B"),
+        ]
+        smooth_speakers(words)
+        self.assertEqual([w.speaker for w in words], ["B", "B", "B"])
+
+    def test_multi_sentence_run_survives(self):
+        words = [
+            W(0.0, 0.6, "everyone.", "B"),
+            W(0.7, 0.85, "Yes.", "A"), W(0.9, 1.05, "Right.", "A"),
+            W(1.2, 1.8, "Exactly.", "B"),
+        ]
+        smooth_speakers(words)
+        self.assertEqual([w.speaker for w in words], ["B", "A", "A", "B"])
+
     def test_flip_between_different_speakers_not_absorbed(self):
         words = [W(0.0, 0.5, "a", "A"), W(0.5, 0.6, "b", "B"), W(0.6, 1.2, "c", "C")]
         smooth_speakers(words)

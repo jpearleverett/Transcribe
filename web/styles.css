@@ -357,3 +357,15 @@ mark { background: color-mix(in srgb, var(--warn) 40%, transparent); color: inhe
 .entry .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14.5px; }
 .entry .meta { flex: none; font-size: 12px; color: var(--fg-faint); font-variant-numeric: tabular-nums; }
 .entry.video .name { font-weight: 600; }
+
+/* Action sheet: three taps rather than a number typed into a prompt. */
+.choice-list { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 12px; }
+.choice {
+  display: flex; flex-direction: column; gap: 2px; width: 100%;
+  padding: 13px 14px; text-align: left;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--bg-raise); color: inherit; font: inherit; cursor: pointer;
+}
+.choice:hover, .choice:focus-visible { border-color: var(--accent); }
+.choice strong { font-size: 15px; }
+.choice span { font-size: 13px; color: var(--fg-dim); }

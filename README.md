@@ -77,6 +77,71 @@ termux-setup-storage      # then allow the Android permission
 Nothing the app did not create is ever deleted — deleting a job removes only
 files it made, never your originals.
 
+## Compressing video
+
+The **Compress** tab re-encodes a video small enough to send or to keep. It uses
+the same browser, so nothing is uploaded and the original is never touched: the
+compressed copy is a new file in Downloads.
+
+The hard question on a phone is not what settings to use, it is *how long this
+will take* — and the honest answer is that nobody can tell you in advance.
+Whether your phone's hardware encoder works, how fast its CPU is, how hot it
+already is and how complex the footage is all move the number by an order of
+magnitude. So the app does not guess. It encodes eight seconds of your actual
+file, times them, and tells you:
+
+```
+Testing h264_mediacodec (hardware) on a 8s sample…
+h264_mediacodec (hardware): 4.30x real time.
+Measured 4.30x real time with h264_mediacodec (hardware) — about 31 minutes
+for the whole video, ending near 5600 MB (21% of the original).
+```
+
+Then you decide, and can cancel before the long part starts.
+
+That trial encode does a second job. Android's MediaCodec hardware encoders are
+listed by ffmpeg on devices where they then hang, or exit cleanly having written
+a zero-byte file — a documented failure on Android 15. Rather than trust the
+encoder list, the app proves the encoder works on *this* phone with *this* file
+and silently falls back to software if it does not:
+
+```
+Testing h264_mediacodec (hardware) on a 8s sample…
+h264_mediacodec (hardware) did not work — produced nothing in 240s — this
+encoder hangs on this device. Trying the next one.
+Testing libx264 (software) on a 8s sample…
+```
+
+| Quality | Result | A 26 GB, 2h13m 4K recording |
+|---|---|---|
+| Small | 720p, sized for messaging | ~1.7 GB (15x smaller) |
+| **Balanced** (default) | 1080p, much smaller and still sharp | ~5.8 GB (4.5x smaller) |
+| High | 1080p, close to the original | ~8.9 GB (2.9x smaller) |
+| Keep the original size | Re-encode only, no downscale | much slower, barely smaller |
+
+Those are the *pre-flight* figures, from bits-per-pixel arithmetic. What you are
+actually told is the number measured on your own file, which is the one to
+trust — sampled predictions land within a few percent, and read slightly high
+because a short clip carries a full container header. Switching the codec to
+HEVC takes roughly 40% off each row, at several times the encoding time.
+
+Downscaling is the single biggest lever, which is why the default uses it: going
+4K → 1080p removes three quarters of the pixels, and on a phone CPU it is also
+the difference between a job that finishes and one that does not. Software 4K
+encoding on a phone runs well under real time — a two-hour video can take a day.
+
+Two things it handles that a hand-written ffmpeg command usually gets wrong:
+
+- **HDR.** Recent phones record HDR, and re-encoding it to H.264 without tone
+  mapping produces the flat, washed-out grey everyone complains about. Measured
+  on a test clip: the naive conversion came out 57% brighter in the mid-tones
+  and 21% less saturated. HDR is detected and converted properly.
+- **Audio.** It is copied untouched whenever the container allows, so there is
+  no second generation of lossy audio and no CPU spent on it.
+
+If the measurement says the result would be *larger* than the original, the job
+stops and says so rather than spending hours proving it.
+
 ## Which engine should you use?
 
 | Engine | Speed for 1 hour of audio | Word-level speakers | Cost | Audio leaves the phone |
@@ -287,12 +352,13 @@ transcribe/          the server
   jobs.py            job store, worker thread, crash recovery
   runner.py          pipeline orchestration
   audio.py           ffmpeg probe and conversion
+  video.py           compression: planning, trial encodes, HDR tone mapping
   httpclient.py      streaming uploads without loading files into RAM
   engines/           one adapter per provider
 web/                 the front end (no build step, no framework)
 gpu/                 the RunPod GPU worker
 tools/               diarize_sherpa.py — offline diarization helper
-tests/               287 tests, no network needed
+tests/               324 tests, no network needed
 ```
 
 Run the tests with `python3 -m unittest discover -s tests`. They need no
@@ -330,7 +396,7 @@ symlinks to your shared storage, so they are deliberately excluded — your phot
 and videos are not part of Termux's size.
 
 The server now also reclaims these automatically each time it starts. For very
-large media, prefer the **Extract audio** tab or transcribing from the file
+large media, prefer the **Extract** tab or transcribing from the file
 browser — neither uploads anything, so neither can leave this behind.
 
 **Start here:** `./run.sh --check`. It walks the whole setup — Python, ffmpeg

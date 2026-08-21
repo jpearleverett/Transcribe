@@ -53,8 +53,12 @@ class Job:
     # deleted — a job pointed at a 29 GB video in Movies must not be able to
     # remove it.
     owns_audio: bool = True
-    kind: str = "transcribe"   # or "extract"
-    output_file: str = ""      # for extract jobs: what we produced
+    kind: str = "transcribe"   # or "extract" / "compress"
+    output_file: str = ""      # for extract and compress jobs: what we produced
+    # What the input weighed. `size` becomes the *output* size once a job that
+    # produces a file finishes, and "40% of the original" is the number worth
+    # showing, so the original has to be kept somewhere.
+    source_size: int = 0
     speakers: dict = field(default_factory=dict)   # label -> user-given name
     options: dict = field(default_factory=dict)
     log: list = field(default_factory=list)

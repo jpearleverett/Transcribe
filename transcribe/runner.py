@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from . import audio as audio_mod, config, jobs as jobs_mod
+from . import audio as audio_mod, config, jobs as jobs_mod, video as video_mod
 from .align import diarize_transcript
 from .engines import base as engines
 
@@ -29,6 +29,8 @@ def _clean_intermediates(job_id: str) -> None:
 def run_job(job) -> None:
     if job.kind == "extract":
         return run_extract(job)
+    if job.kind == "compress":
+        return run_compress(job)
     return run_transcription(job)
 
 
@@ -93,6 +95,155 @@ def run_extract(job) -> None:
                           "of the video)")
     store.update(job.id, output_file=str(dest), size=size,
                  model=mode, language=job.language)
+
+
+def run_compress(job) -> None:
+    """Re-encode a local video smaller, measuring first so the ETA is honest.
+
+    The measurement is not a nicety. On a phone the same job can take forty
+    minutes or fourteen hours depending on whether the hardware encoder works,
+    and there is no way to know which without trying it — so we try it, on
+    eight seconds of the actual file, before committing the user to hours.
+    """
+    from . import files as files_mod
+
+    store = jobs_mod.store()
+    cfg = config.load()
+    source = Path(job.audio_file)
+    if not source.exists():
+        raise engines.EngineError("That video is no longer there.")
+
+    store.progress(job.id, "inspecting", 0.01)
+    try:
+        info = video_mod.probe_video(source)
+    except video_mod.VideoError as e:
+        raise engines.EngineError(str(e))
+
+    duration = info.get("duration") or 0.0
+    if duration <= 0:
+        raise engines.EngineError("This video has no readable duration, so it "
+                                  "cannot be compressed safely.")
+    store.update(job.id, duration=duration)
+
+    opts = job.options or {}
+    quality = opts.get("compress_quality") or cfg["compress_quality"]
+    speed = opts.get("compress_speed") or cfg["compress_speed"]
+    codec = opts.get("compress_codec") or cfg["compress_codec"]
+    try:
+        plans = video_mod.build_plans(
+            info, quality=quality, speed=speed, codec=codec,
+            hardware=bool(cfg["compress_hardware"]))
+    except video_mod.VideoError as e:
+        raise engines.EngineError(str(e))
+
+    width, height = video_mod.display_size(info)
+    store.add_log(job.id, f"Source: {width}x{height} {info.get('codec') or '?'}"
+                          f"{' HDR' if info.get('hdr') else ''}, "
+                          f"{audio_mod.format_duration(duration)}, "
+                          f"{info['size'] / 1e9:.2f} GB")
+    for note in plans[0].notes:
+        store.add_log(job.id, note)
+    store.add_log(job.id, plans[0].audio_note)
+
+    out_dir = files_mod.output_dir()
+    dest = _unique_path(out_dir / f"{source.stem} (compressed).mp4")
+
+    # A rough check before spending anything: if there is not room for even the
+    # optimistic estimate, say so now rather than after a trial encode.
+    rough = video_mod.estimate_bytes(info, plans[0], duration)
+    _require_space(out_dir, rough, files_mod)
+
+    store.progress(job.id, "measuring", 0.02)
+    if len(plans) > 1 or duration > video_mod.CALIBRATE_ABOVE:
+        try:
+            measured = video_mod.choose_plan(
+                source, plans, duration=duration, workdir=config.UPLOAD_DIR,
+                stem=job.id, log=lambda m: store.add_log(job.id, m),
+                should_abort=lambda: store.is_cancelled(job.id))
+        except video_mod.VideoError as e:
+            if str(e) == "cancelled":
+                return
+            raise engines.EngineError(str(e))
+    else:
+        measured = video_mod.Measurement(plan=plans[0], ok=True)
+
+    if store.is_cancelled(job.id):
+        return
+
+    plan = measured.plan
+    predicted = measured.predict_bytes(duration) if measured.speed else rough
+    if measured.speed:
+        store.add_log(
+            job.id,
+            f"Measured {measured.speed:.2f}x real time with {plan.label} — "
+            f"about {video_mod.format_eta(measured.eta(duration))} for the whole "
+            f"video, ending near {predicted / 1e6:.0f} MB "
+            f"({predicted / max(info['size'], 1):.0%} of the original).")
+
+    if predicted >= info["size"]:
+        if measured.speed:
+            # Measured, so this is worth acting on: hours of encoding to end up
+            # with a larger file is the worst outcome available here.
+            raise engines.EngineError(
+                f"This would not make the file smaller — about "
+                f"{predicted / 1e6:.0f} MB against the original's "
+                f"{info['size'] / 1e6:.0f} MB. The video is already efficiently "
+                "encoded. Choose 'Small' or 'Balanced' quality, or leave it as it is.")
+        store.add_log(job.id, "Warning: this may not end up smaller than the "
+                              "original — it is already efficiently encoded.")
+    _require_space(out_dir, predicted, files_mod)
+
+    store.add_log(job.id, f"Writing {dest}")
+    if predicted > (1 << 30):
+        # +faststart moves the index to the front once encoding is finished,
+        # which on a file this size is a further pass over it with nothing to
+        # report. Better to say so than to look stalled at 99%.
+        store.add_log(job.id, "It will sit near the end for a while at the "
+                              "finish, moving the index to the front of the "
+                              "file so it starts playing instantly.")
+    started = time.time()
+    try:
+        video_mod.compress_video(
+            source, dest, plan, duration=duration,
+            on_progress=lambda f: store.progress(job.id, "compressing", 0.06 + 0.92 * f),
+            should_abort=lambda: store.is_cancelled(job.id))
+    except video_mod.VideoError as e:
+        dest.unlink(missing_ok=True)
+        if str(e) == "cancelled":
+            return
+        raise engines.EngineError(str(e))
+    except BaseException:
+        # Half an encode is worth nothing and, on a phone short of space,
+        # costs plenty.
+        dest.unlink(missing_ok=True)
+        raise
+    finally:
+        _clean_intermediates(job.id)
+
+    if store.is_cancelled(job.id):
+        dest.unlink(missing_ok=True)
+        return
+
+    size = dest.stat().st_size
+    elapsed = time.time() - started
+    store.add_log(
+        job.id,
+        f"Done in {video_mod.format_eta(elapsed)} — {size / 1e6:.0f} MB, "
+        f"{size / max(info['size'], 1):.0%} of the original "
+        f"({(info['size'] - size) / 1e9:.2f} GB saved)")
+    store.update(job.id, output_file=str(dest), size=size,
+                 model=f"{plan.encoder} {quality}", language=job.language)
+
+
+def _require_space(out_dir: Path, needed: int, files_mod) -> None:
+    """Refuse before starting rather than fail hours in with a part-written file."""
+    needed = int(needed) + (64 << 20)
+    free = files_mod.free_bytes(out_dir)
+    if free and free < needed:
+        raise engines.EngineError(
+            f"Not enough space in {out_dir}: about {needed / 1e6:.0f} MB needed, "
+            f"{free / 1e6:.0f} MB free. Free some space, or choose a smaller "
+            "quality setting.")
 
 
 def _unique_path(path: Path) -> Path:

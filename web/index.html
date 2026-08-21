@@ -24,20 +24,29 @@
 <main id="listView" class="view">
   <div class="tabs" role="tablist">
     <button class="tab active" id="tabTranscribe" role="tab" aria-selected="true">Transcribe</button>
-    <button class="tab" id="tabExtract" role="tab" aria-selected="false">Extract audio</button>
+    <button class="tab" id="tabExtract" role="tab" aria-selected="false">Extract</button>
+    <button class="tab" id="tabCompress" role="tab" aria-selected="false">Compress</button>
   </div>
 
   <section id="extractPanel" hidden>
     <p class="hint">Pull the audio out of a video already on this phone. The video is
       read where it sits and never copied, so size is not a problem.</p>
+  </section>
 
+  <section id="compressPanel" hidden>
+    <p class="hint">Make a video small enough to send or to keep. It first encodes a
+      few seconds and times them, so the estimate you get is measured on this phone,
+      with this file — and you can cancel before the long part starts.</p>
+  </section>
+
+  <section id="browserPanel" hidden>
     <div class="browser">
       <div class="crumbs" id="crumbs"></div>
       <div id="browseList" class="browse-list"></div>
       <p class="empty" id="browseEmpty" hidden></p>
     </div>
 
-    <details class="advanced">
+    <details class="advanced" id="extractOptions" hidden>
       <summary>Output</summary>
       <label class="field">Format
         <select id="extractMode">
@@ -48,6 +57,31 @@
         </select>
       </label>
       <p class="hint small" id="extractDest"></p>
+    </details>
+
+    <details class="advanced" id="compressOptions" hidden>
+      <summary>Output</summary>
+      <label class="field">Quality
+        <select id="compressQuality">
+          <option value="small">Small — 720p, sized for messaging</option>
+          <option value="balanced" selected>Balanced — 1080p, much smaller and still sharp</option>
+          <option value="high">High — 1080p, close to the original</option>
+          <option value="original">Keep the original size — re-encode only</option>
+        </select>
+      </label>
+      <label class="field">Speed
+        <select id="compressSpeed">
+          <option value="fast" selected>Fast — finishes sooner, file a little larger</option>
+          <option value="smaller">Smaller — noticeably slower, squeezes harder</option>
+        </select>
+      </label>
+      <label class="field">Codec
+        <select id="compressCodec">
+          <option value="h264" selected>H.264 — plays on everything</option>
+          <option value="hevc">HEVC — about 40% smaller, newer devices only</option>
+        </select>
+      </label>
+      <p class="hint small" id="compressDest"></p>
     </details>
   </section>
 
@@ -210,6 +244,17 @@
     <div class="sheet-actions">
       <button class="btn ghost" value="cancel">Cancel</button>
       <button class="btn" value="ok">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="chooseDialog" class="sheet">
+  <form method="dialog" class="sheet-inner">
+    <header class="sheet-head"><h2 id="chooseTitle">Choose</h2><button class="icon-btn" value="cancel" aria-label="Close">&times;</button></header>
+    <p class="hint small" id="chooseSub"></p>
+    <div class="choice-list" id="chooseList"></div>
+    <div class="sheet-actions">
+      <button class="btn ghost" value="cancel">Cancel</button>
     </div>
   </form>
 </dialog>

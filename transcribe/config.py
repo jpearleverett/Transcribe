@@ -34,6 +34,11 @@ DEFAULTS = {
     "media_roots": [],           # extra folders to browse, beyond the defaults
     "extract_dir": "",           # where extracted audio lands ("" = Downloads)
     "extract_mode": "copy",      # copy | opus | mp3 | wav
+    # Compressing local video
+    "compress_quality": "balanced",   # small | balanced | high | original
+    "compress_speed": "fast",         # fast | smaller
+    "compress_codec": "h264",         # h264 | hevc
+    "compress_hardware": True,        # try the phone's hardware encoder first
     "max_upload_mb": 2048,
     # Local engine settings
     "local_model": "ggml-small.en-q5_1.bin",

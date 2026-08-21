@@ -148,13 +148,69 @@ class BrowserTest(unittest.TestCase):
             self.assertTrue(self.page.locator(".entry", has_text="recording.mp4").count())
 
             self.page.locator(".entry", has_text="recording.mp4").first.click()
-            self.page.wait_for_timeout(500)
-            self.page.fill("#promptInput", "1")
-            self.page.locator("#promptDialog button[value='ok']").click()
+            self.page.wait_for_selector("#chooseDialog .choice", timeout=10000)
+            # The tab decides which action leads, so Extract must be first here.
+            self.assertIn("Extract",
+                          self.page.locator("#chooseDialog .choice").first.inner_text())
+            self.page.locator("#chooseDialog .choice", has_text="Extract").click()
 
             self.page.wait_for_selector("#dlOut", timeout=60000)
             self.assertIn(".m4a", self.page.locator("#transcript").inner_text())
             self.assertTrue(video.exists(), "extraction must not touch the source")
+            self.assertEqual(self.errors, [])
+        finally:
+            config.save({"media_roots": [], "extract_dir": ""})
+
+    def test_compress_tab_offers_compression_first_and_runs_it(self):
+        """The third tab, driven end to end in a real browser."""
+        import shutil
+        import subprocess
+        import tempfile
+        from transcribe import config
+
+        if not shutil.which("ffmpeg"):
+            self.skipTest("needs ffmpeg")
+
+        media = Path(tempfile.mkdtemp(prefix="phone-video-"))
+        out = Path(tempfile.mkdtemp(prefix="phone-small-"))
+        video = media / "holiday.mp4"
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=5",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+             "-c:v", "libx264", "-b:v", "10M", "-preset", "ultrafast",
+             "-c:a", "aac", "-shortest", "-y", str(video)],
+            check=True, capture_output=True)
+        before = video.stat().st_size
+        config.save({"media_roots": [str(media)], "extract_dir": str(out)})
+        try:
+            self.page.reload(wait_until="networkidle")
+            self.page.click("#tabCompress")
+            self.page.wait_for_selector(".entry", timeout=10000)
+            self.assertTrue(self.page.locator("#compressOptions").is_visible())
+            self.assertFalse(self.page.locator("#extractOptions").is_visible())
+            self.assertFalse(self.page.locator("#dropZone").is_visible())
+
+            self.page.locator(".entry", has_text=media.name).first.click()
+            self.page.wait_for_timeout(600)
+            self.page.locator(".entry", has_text="holiday.mp4").first.click()
+
+            self.page.wait_for_selector("#chooseDialog .choice", timeout=10000)
+            self.assertIn("Compress",
+                          self.page.locator("#chooseDialog .choice").first.inner_text(),
+                          "the tab you are on should lead the list")
+            self.page.locator("#chooseDialog .choice", has_text="Compress").click()
+
+            self.page.wait_for_selector("#dlOut", timeout=180000)
+            body = self.page.locator("#transcript").inner_text()
+            self.assertIn("Video compressed", body)
+            self.assertIn("smaller than the original", body)
+
+            produced = list(out.glob("*.mp4"))
+            self.assertEqual(len(produced), 1, produced)
+            self.assertLess(produced[0].stat().st_size, before)
+            self.assertEqual(video.stat().st_size, before,
+                             "the source video must survive untouched")
             self.assertEqual(self.errors, [])
         finally:
             config.save({"media_roots": [], "extract_dir": ""})
@@ -167,7 +223,9 @@ class BrowserTest(unittest.TestCase):
     def test_hidden_elements_are_actually_hidden(self):
         """Regression: a component `display` rule outranks the hidden attribute."""
         for sel in ("#detailView", "#player", "#toolbar", "#exportMenu",
-                    "#moreMenu", "#backBtn", "#uploadProgress"):
+                    "#moreMenu", "#backBtn", "#uploadProgress",
+                    "#compressPanel", "#browserPanel", "#compressOptions",
+                    "#extractOptions", "#chooseDialog"):
             self.assertFalse(self.page.locator(sel).is_visible(),
                              f"{sel} should be hidden on the list view")
 

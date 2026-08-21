@@ -99,6 +99,37 @@ def check_ffmpeg(rep):
         rep.add(WARN, "no libopus encoder — audio uploads at full size",
                 "pkg install ffmpeg  (or reinstall it; this build lacks libopus)")
 
+    check_video(rep, out if code == 0 else "")
+
+
+def check_video(rep, encoder_list: str):
+    """What this build can do with video, which decides hours of waiting."""
+    rep.section("Video tools")
+    if "libx264" in encoder_list:
+        rep.add(OK, "libx264 encoder (software H.264)")
+    else:
+        rep.add(BAD, "no libx264 encoder — video cannot be compressed",
+                "pkg install ffmpeg")
+
+    hardware = sorted(name for name in ("h264_mediacodec", "hevc_mediacodec")
+                      if name in encoder_list)
+    if hardware:
+        # Present is not the same as working: Android 15 devices are on record
+        # configuring these fine and then writing a 0-byte file. The app proves
+        # it with a trial encode before committing to a long job.
+        rep.add(OK, f"hardware encoder available ({', '.join(hardware)}) — "
+                    "tested on a short sample before each job")
+    else:
+        rep.add(WARN, "no hardware video encoder — compression runs on the CPU, "
+                      "which on a phone is several times slower than real time")
+
+    code, filt = _run([audio.FFMPEG, "-hide_banner", "-filters"])
+    if code == 0 and "zscale" in filt:
+        rep.add(OK, "zscale filter (HDR video converts without going grey)")
+    else:
+        rep.add(WARN, "no zscale filter — HDR video will look flat when compressed",
+                "pkg install ffmpeg  (this build lacks libzimg)")
+
 
 def check_termux(rep):
     prefix = os.environ.get("PREFIX", "")

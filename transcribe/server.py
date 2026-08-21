@@ -24,7 +24,7 @@ from pathlib import Path
 
 from . import config, files as files_mod, jobs as jobs_mod, runner
 from .align import Segment, Word, merge_adjacent, speaker_stats
-from . import audio as audio_mod
+from . import audio as audio_mod, video as video_mod
 from .engines import base as engines
 from .exporters import export
 
@@ -225,7 +225,30 @@ class Handler(BaseHTTPRequestHandler):
     def _config_payload(self) -> dict:
         cfg = config.redacted()
         cfg["server_info"] = f"Transcribe {VERSION} · Python {'.'.join(map(str, __import__('sys').version_info[:3]))}"
-        return {"config": cfg, "engines": engines.describe_all()}
+        return {"config": cfg, "engines": engines.describe_all(),
+                "media": self._media_payload()}
+
+    @staticmethod
+    def _media_payload() -> dict:
+        """What the device can do with local media, so the UI can say so.
+
+        Whether a hardware video encoder exists is worth surfacing before
+        somebody starts a job: it is the difference between half an hour and
+        half a day. It is still only a *candidate* here — nothing is promised
+        until a trial encode proves it works on this phone.
+        """
+        payload = {"output_dir": "", "free_bytes": 0, "ffmpeg": audio_mod.have_ffmpeg(),
+                   "hardware_encoders": []}
+        try:
+            out = files_mod.output_dir()
+            payload["output_dir"] = str(out)
+            payload["free_bytes"] = files_mod.free_bytes(out)
+        except OSError:
+            pass
+        if audio_mod.have_ffmpeg():
+            payload["hardware_encoders"] = sorted(
+                n for n in video_mod.encoders() if n.endswith("_mediacodec"))
+        return payload
 
     # -------------------- static --------------------
 
@@ -337,11 +360,18 @@ class Handler(BaseHTTPRequestHandler):
         except (FileNotFoundError, ValueError) as e:
             return self.fail(str(e), 404)
 
-        kind = "extract" if body.get("kind") == "extract" else "transcribe"
+        kind = str(body.get("kind") or "transcribe")
+        if kind not in ("extract", "compress", "transcribe"):
+            kind = "transcribe"
         store = jobs_mod.store()
         options = {
             "num_speakers": _int(body.get("num_speakers"), 0),
             "extract_mode": str(body.get("extract_mode") or "") or None,
+            "compress_quality": _choice(body.get("compress_quality"),
+                                        video_mod.QUALITY_PRESETS),
+            "compress_speed": _choice(body.get("compress_speed"),
+                                      video_mod.SPEED_PRESETS),
+            "compress_codec": _choice(body.get("compress_codec"), video_mod.CODECS),
         }
         options = {k: v for k, v in options.items() if v not in (None, "")}
 
@@ -359,7 +389,10 @@ class Handler(BaseHTTPRequestHandler):
         else:
             engine_name = ""
             if not audio_mod.have_ffmpeg():
-                return self.fail("ffmpeg is needed to extract audio. Run:  pkg install ffmpeg")
+                return self.fail("ffmpeg is needed for this. Run:  pkg install ffmpeg")
+            if kind == "compress" and source.suffix.lower() not in files_mod.VIDEO_EXTS:
+                return self.fail("That is an audio file — there is no video in it "
+                                 "to compress.")
 
         job = store.create(
             name=source.name,
@@ -367,6 +400,7 @@ class Handler(BaseHTTPRequestHandler):
             engine=engine_name,
             language=str(body.get("language") or "") or config.load()["language"],
             size=source.stat().st_size,
+            source_size=source.stat().st_size,
             audio_file=str(source),
             owns_audio=False,          # the user's file; never delete it
             media_type=mimetypes.guess_type(str(source))[0] or "",
@@ -701,6 +735,16 @@ def _job_options(q: dict) -> dict:
         if k not in _UPLOAD_PARAMS and k not in opts:
             opts[k] = v
     return opts
+
+
+def _choice(value, allowed):
+    """Only ever pass through a name the module itself defines.
+
+    These land in ffmpeg arguments, so an unrecognised one is dropped rather
+    than forwarded and the server-side default applies.
+    """
+    name = str(value or "").strip()
+    return name if name in allowed else None
 
 
 def _int(value, default: int) -> int:

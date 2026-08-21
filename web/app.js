@@ -23,6 +23,7 @@ const state = {
   result: null,        // { segments, speakers, meta }
   engines: [],
   config: {},
+  media: {},          // what this device can do with local files
   showTimestamps: true,
   merged: true,
   search: '',
@@ -98,6 +99,32 @@ function ask(title, label, value) {
     dlg.addEventListener('close', onClose);
     dlg.showModal();
     setTimeout(() => { input.focus(); input.select(); }, 50);
+  });
+}
+
+function choose(title, subtitle, actions) {
+  return new Promise((resolve) => {
+    const dlg = $('chooseDialog');
+    $('chooseTitle').textContent = title;
+    $('chooseSub').textContent = subtitle || '';
+    const list = $('chooseList');
+    list.innerHTML = '';
+    let picked = null;
+    for (const action of actions) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'choice';
+      btn.innerHTML = `<strong>${esc(action.label)}</strong>`
+        + (action.note ? `<span>${esc(action.note)}</span>` : '');
+      btn.addEventListener('click', () => { picked = action.kind; dlg.close('ok'); });
+      list.appendChild(btn);
+    }
+    const onClose = () => {
+      dlg.removeEventListener('close', onClose);
+      resolve(dlg.returnValue === 'ok' ? picked : null);
+    };
+    dlg.addEventListener('close', onClose);
+    dlg.showModal();
   });
 }
 
@@ -304,6 +331,8 @@ const STAGE_TEXT = {
   polling: 'Waiting for the engine', downloading: 'Fetching result',
   assembling: 'Building transcript', done: 'Done', failed: 'Failed',
   cancelled: 'Cancelled', interrupted: 'Interrupted',
+  inspecting: 'Reading the video', measuring: 'Timing a test encode',
+  compressing: 'Compressing',
 };
 
 function renderJobList() {
@@ -391,11 +420,11 @@ function renderDetailHeader(job) {
   $('detailMeta').innerHTML = bits.map((b) => `<span>${esc(b)}</span>`).join('');
 
   const running = job.status === 'running' || job.status === 'pending';
-  const isExtract = job.kind === 'extract';
+  const madeAFile = job.kind === 'extract' || job.kind === 'compress';
   $('progressPanel').hidden = !running;
   $('errorPanel').hidden = job.status !== 'failed' && job.status !== 'cancelled';
-  $('toolbar').hidden = isExtract || job.status !== 'done';
-  if (isExtract && job.status === 'done') renderExtractResult(job);
+  $('toolbar').hidden = madeAFile || job.status !== 'done';
+  if (madeAFile && job.status === 'done') renderFileResult(job);
 
   if (running) {
     $('stageLabel').textContent = STAGE_TEXT[job.stage] || job.stage;
@@ -420,11 +449,17 @@ function renderDetailHeader(job) {
   }
 }
 
-function renderExtractResult(job) {
+function renderFileResult(job) {
   const name = (job.output_file || '').split('/').pop();
+  const compressed = job.kind === 'compress';
+  // The saving is the whole point of compressing, so lead with it.
+  const saved = compressed && job.source_size && job.size
+    ? ` · ${bytes(job.source_size - job.size)} smaller than the original`
+    : '';
   $('transcript').innerHTML =
-    '<div class="progress-panel"><strong>Audio extracted</strong>'
-    + `<p class="hint">Saved to your device as <code>${esc(name)}</code> · ${esc(bytes(job.size))}</p>`
+    `<div class="progress-panel"><strong>${compressed ? 'Video compressed' : 'Audio extracted'}</strong>`
+    + `<p class="hint">Saved to your device as <code>${esc(name)}</code> · `
+    + `${esc(bytes(job.size))}${esc(saved)}</p>`
     + '<button class="btn" id="dlOut">Save a copy</button> '
     + '<button class="btn ghost" id="txOut">Transcribe it</button></div>';
   $('dlOut').addEventListener('click', () => {
@@ -445,7 +480,8 @@ function renderExtractResult(job) {
 
 async function refreshDetail(id) {
   const job = state.jobs.get(id);
-  if (job && job.kind === 'extract') return;   // extraction has no transcript
+  // Neither extraction nor compression produces a transcript to fetch.
+  if (job && (job.kind === 'extract' || job.kind === 'compress')) return;
   if (job && job.status !== 'done') return;
   try {
     const data = await api(`/api/jobs/${id}/result?merged=${state.merged ? 1 : 0}`);
@@ -798,20 +834,32 @@ $('retryBtn').addEventListener('click', async () => {
 
 let browsePath = '';
 
+const TABS = ['transcribe', 'extract', 'compress'];
+let currentTab = 'transcribe';
+
 function showTab(which) {
-  const extract = which === 'extract';
-  $('tabExtract').classList.toggle('active', extract);
-  $('tabTranscribe').classList.toggle('active', !extract);
-  $('tabExtract').setAttribute('aria-selected', String(extract));
-  $('tabTranscribe').setAttribute('aria-selected', String(!extract));
-  $('extractPanel').hidden = !extract;
-  $('dropZone').hidden = extract;
-  $('jobsTitle').textContent = extract ? 'Recent' : 'Transcripts';
-  if (extract && !$('browseList').childElementCount) browse('');
+  if (!TABS.includes(which)) which = 'transcribe';
+  currentTab = which;
+  const onDevice = which !== 'transcribe';
+  for (const name of TABS) {
+    const btn = $('tab' + name[0].toUpperCase() + name.slice(1));
+    btn.classList.toggle('active', name === which);
+    btn.setAttribute('aria-selected', String(name === which));
+  }
+  $('extractPanel').hidden = which !== 'extract';
+  $('compressPanel').hidden = which !== 'compress';
+  $('browserPanel').hidden = !onDevice;
+  $('extractOptions').hidden = which !== 'extract';
+  $('compressOptions').hidden = which !== 'compress';
+  $('dropZone').hidden = onDevice;
+  $('jobsTitle').textContent = onDevice ? 'Recent' : 'Transcripts';
+  if (onDevice && !$('browseList').childElementCount) browse('');
 }
 
-$('tabTranscribe').addEventListener('click', () => showTab('transcribe'));
-$('tabExtract').addEventListener('click', () => showTab('extract'));
+for (const name of TABS) {
+  $('tab' + name[0].toUpperCase() + name.slice(1))
+    .addEventListener('click', () => showTab(name));
+}
 
 async function browse(path) {
   const list = $('browseList');
@@ -897,15 +945,29 @@ function renderCrumbs(data) {
 }
 
 async function pickLocal(item) {
-  const choice = await ask(
-    item.name,
-    `${bytes(item.size)}\n\n1. Extract the audio to a file\n2. Transcribe it\n\nEnter a number`,
-    item.video ? '1' : '2');
-  if (choice !== '1' && choice !== '2') return;
+  // The tab you are on says what you came here to do, so that action is
+  // offered first — but all of them stay one tap away rather than making you
+  // back out and switch tabs.
+  const actions = [
+    { kind: 'compress', label: 'Compress the video',
+      note: 'Re-encode it smaller, keeping the original', videoOnly: true },
+    { kind: 'extract', label: 'Extract the audio',
+      note: 'Write the sound out as its own file' },
+    { kind: 'transcribe', label: 'Transcribe it',
+      note: 'Text by speaker, with timestamps' },
+  ].filter((a) => !a.videoOnly || item.video);
+  actions.sort((a, b) => (b.kind === currentTab) - (a.kind === currentTab));
 
-  const body = { path: item.path, kind: choice === '1' ? 'extract' : 'transcribe' };
-  if (choice === '1') {
+  const kind = await choose(item.name, bytes(item.size), actions);
+  if (!kind) return;
+
+  const body = { path: item.path, kind };
+  if (kind === 'extract') {
     body.extract_mode = $('extractMode').value;
+  } else if (kind === 'compress') {
+    body.compress_quality = $('compressQuality').value;
+    body.compress_speed = $('compressSpeed').value;
+    body.compress_codec = $('compressCodec').value;
   } else {
     body.engine = $('engineSelect').value;
     body.num_speakers = $('speakersSelect').value;
@@ -918,6 +980,24 @@ async function pickLocal(item) {
     applyJob(data.job);
     openJob(data.job.id);
   } catch (e) { toast(e.message); }
+}
+
+function renderMediaHints() {
+  const media = state.media || {};
+  const where = media.output_dir
+    ? `Files are saved to ${media.output_dir}`
+    : 'Files are saved to your Downloads folder';
+  const free = media.free_bytes ? ` · ${bytes(media.free_bytes)} free` : '';
+  $('extractDest').textContent = where + free + '.';
+
+  // Say up front whether the phone even has a hardware encoder to try. It is
+  // the single biggest factor in how long a compression takes, and knowing
+  // beforehand beats being surprised by the estimate.
+  const hw = (media.hardware_encoders || []).length
+    ? 'This phone reports a hardware video encoder, so that is tried first.'
+    : 'No hardware video encoder on this device — encoding runs on the CPU, '
+      + 'which is much slower.';
+  $('compressDest').textContent = `${where}${free}. ${hw}`;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1057,6 +1137,7 @@ $('settingsDialog').addEventListener('close', async () => {
     });
     state.config = data.config;
     state.engines = data.engines;
+    state.media = data.media || state.media;
     fillEngines($('engineSelect'), state.config.engine);
     fillLanguages($('languageSelect'), state.config.language);
     updateEngineNote();
@@ -1073,6 +1154,7 @@ async function boot() {
     const data = await api('/api/config');
     state.config = data.config;
     state.engines = data.engines;
+    state.media = data.media || {};
   } catch {
     toast('Cannot reach the server. Is it still running in Termux?');
   }
@@ -1083,6 +1165,10 @@ async function boot() {
 
   const em = $('extractMode');
   if (em) em.value = state.config.extract_mode || 'copy';
+  $('compressQuality').value = state.config.compress_quality || 'balanced';
+  $('compressSpeed').value = state.config.compress_speed || 'fast';
+  $('compressCodec').value = state.config.compress_codec || 'h264';
+  renderMediaHints();
 
   await refreshJobs();
   connectLive();

@@ -55,8 +55,8 @@ def run_check():
 class DoctorTest(unittest.TestCase):
     def test_runs_without_network_and_reports(self):
         code, out = run_check()
-        for heading in ("Python", "Audio tools", "Storage", "Network",
-                        "Engines", "Self-test"):
+        for heading in ("Python", "Audio tools", "Video tools", "Storage",
+                        "Network", "Engines", "Self-test"):
             self.assertIn(heading, out, f"missing section: {heading}")
         self.assertIn("attribution and all six export formats work", out,
                       "the pipeline self-test must actually run")
@@ -103,6 +103,27 @@ class DoctorTest(unittest.TestCase):
             self.assertIn("ffmpeg is missing", out)
             self.assertIn("pkg install ffmpeg", out)
             self.assertEqual(code, 1)
+        finally:
+            audio.FFMPEG = saved
+
+    def test_video_section_reports_what_the_build_can_do(self):
+        """Whether a phone has a hardware encoder decides hours of waiting."""
+        _code, out = run_check()
+        video_part = out.split("Video tools", 1)[1].split("Storage", 1)[0]
+        self.assertIn("libx264", video_part)
+        self.assertTrue("hardware encoder available" in video_part
+                        or "no hardware video encoder" in video_part, video_part)
+        self.assertIn("zscale", video_part,
+                      "HDR handling is worth a line either way")
+
+    def test_missing_ffmpeg_skips_the_video_section_rather_than_crashing(self):
+        from transcribe import audio
+        saved = audio.FFMPEG
+        audio.FFMPEG = None
+        try:
+            _code, out = run_check()
+            self.assertNotIn("Video tools", out,
+                             "with no ffmpeg there is nothing to report about it")
         finally:
             audio.FFMPEG = saved
 

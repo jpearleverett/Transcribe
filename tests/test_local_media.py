@@ -419,6 +419,61 @@ class LocalJobTest(unittest.TestCase):
                          "a failed extraction must not leave a file behind")
         silent.unlink()
 
+    # ---------------- compressing video ----------------
+
+    def test_compress_shrinks_the_video_and_leaves_the_original_alone(self):
+        """A compress job must be additive: a new file, the old one untouched."""
+        source = make_video(self.media / "to shrink.mp4", seconds=6.0)
+        # Give it something worth compressing, at a size worth reducing.
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=6",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=6",
+             "-c:v", "libx264", "-b:v", "10M", "-preset", "ultrafast",
+             "-c:a", "aac", "-shortest", "-y", str(source)],
+            check=True, capture_output=True)
+        before = source.stat().st_size
+
+        created = self.req("/api/local", "POST",
+                           {"path": str(source), "kind": "compress",
+                            "compress_quality": "small"})
+        self.assertEqual(created["job"]["kind"], "compress")
+        job = self.wait(created["job"]["id"], timeout=300)
+
+        out = Path(job["output_file"])
+        self.assertTrue(out.exists())
+        self.assertEqual(out.parent, self.out)
+        self.assertEqual(out.suffix, ".mp4")
+        self.assertLess(out.stat().st_size, before)
+        self.assertEqual(source.stat().st_size, before,
+                         "the original video must be untouched")
+        self.assertEqual(job["source_size"], before,
+                         "the original size has to survive for the UI to show a saving")
+
+    def test_compressing_an_audio_file_is_refused_before_anything_runs(self):
+        audio_file = make_wav(self.media / "just audio.wav", seconds=1.0)
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self.req("/api/local", "POST",
+                     {"path": str(audio_file), "kind": "compress"})
+        self.assertEqual(cm.exception.code, 400)
+        self.assertIn("no video", cm.exception.read().decode().lower())
+
+    def test_a_made_up_quality_never_reaches_ffmpeg(self):
+        created = self.req("/api/local", "POST",
+                           {"path": str(self.video), "kind": "compress",
+                            "compress_quality": "; rm -rf /",
+                            "compress_codec": "made-up"})
+        options = created["job"]["options"]
+        self.assertNotIn("compress_quality", options)
+        self.assertNotIn("compress_codec", options)
+        self.req(f"/api/jobs/{created['job']['id']}/cancel", "POST")
+
+    def test_config_reports_what_this_device_can_do(self):
+        media = self.req("/api/config")["media"]
+        self.assertTrue(media["ffmpeg"])
+        self.assertTrue(media["output_dir"])
+        self.assertIsInstance(media["hardware_encoders"], list)
+
     def test_rejects_a_path_outside_the_media_roots(self):
         with self.assertRaises(urllib.error.HTTPError) as cm:
             self.req("/api/local", "POST", {"path": "/etc/hosts", "kind": "extract"})

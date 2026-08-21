@@ -36,7 +36,12 @@ def have_ffmpeg() -> bool:
 
 
 def probe(path: Path) -> dict:
-    """Return {duration, sample_rate, channels, codec, bitrate, format}.
+    """Return {duration, sample_rate, channels, codec, bitrate, audio_bitrate, ...}.
+
+    `bitrate` is the *container* rate — everything in the file, video included.
+    `audio_bitrate` is the audio stream alone. Confusing the two is a large
+    error on video: a 26 GB recording has a container rate around 26 Mbps and an
+    audio track nearer 192 kbps, a factor of 135.
 
     Falls back to a WAV header read when ffprobe is missing, so the app still
     works (with reduced features) on a Termux install without ffmpeg.
@@ -69,6 +74,7 @@ def probe(path: Path) -> dict:
                         "channels": int(s.get("channels") or 0),
                         "codec": s.get("codec_name") or "",
                         "bitrate": int(_f(fmt.get("bit_rate")) or 0),
+                        "audio_bitrate": int(_f(s.get("bit_rate")) or 0),
                         "format": (fmt.get("format_name") or "").split(",")[0],
                         "size": int(_f(fmt.get("size")) or path.stat().st_size),
                     }
@@ -91,7 +97,8 @@ def _probe_wav_fallback(path: Path) -> dict:
     """Read a RIFF/WAVE header directly — no ffprobe required."""
     size = path.stat().st_size
     info = {"duration": 0.0, "sample_rate": 0, "channels": 0, "codec": "",
-            "bitrate": 0, "format": path.suffix.lstrip("."), "size": size}
+            "bitrate": 0, "audio_bitrate": 0, "format": path.suffix.lstrip("."),
+            "size": size}
     try:
         with open(path, "rb") as fh:
             head = fh.read(44)
@@ -99,7 +106,8 @@ def _probe_wav_fallback(path: Path) -> dict:
             channels, rate, byte_rate = struct.unpack("<HII", head[22:32])
             bits = struct.unpack("<H", head[34:36])[0]
             info.update({"sample_rate": rate, "channels": channels, "codec": "pcm",
-                         "bitrate": byte_rate * 8, "format": "wav"})
+                         "bitrate": byte_rate * 8, "audio_bitrate": byte_rate * 8,
+                         "format": "wav"})
             if byte_rate:
                 info["duration"] = max(0.0, (size - 44) / byte_rate)
             elif rate and channels and bits:
@@ -235,6 +243,41 @@ def plan_extract(src: Path, mode: str = "copy") -> tuple:
                         "-c:a", "pcm_s16le"], info
     return ".opus", ["-vn", "-sn", "-dn", "-ac", "1", "-ar", "16000",
                      "-c:a", "libopus", "-b:a", "48k"], info
+
+
+# Output rates for the re-encoding modes, matching the arguments in
+# plan_extract. Used only for the free-space check.
+_MODE_BITRATE = {"opus": 48_000, "mp3": 128_000, "wav": 16_000 * 2 * 8}
+# When ffprobe does not report the audio stream's rate, assume a generous
+# consumer-video AAC track rather than guessing low and running out of disk.
+_ASSUMED_AUDIO_BITRATE = 256_000
+
+
+def estimate_extract_bytes(info: dict, mode: str, duration: float) -> int:
+    """Roughly how large the extracted audio will be.
+
+    Deliberately mode-aware. Reading the *container* bitrate here — which
+    includes the video — overestimates a 26 GB recording's audio track by more
+    than a hundredfold, and refuses the job for lack of space it never needed.
+    """
+    duration = max(duration, 1.0)
+    if mode in _MODE_BITRATE:
+        rate = _MODE_BITRATE[mode]
+    else:
+        # A stream copy comes out the size of the audio track itself.
+        rate = int(info.get("audio_bitrate") or 0)
+        if rate <= 0:
+            sample_rate = int(info.get("sample_rate") or 0)
+            channels = int(info.get("channels") or 0)
+            if (info.get("codec") or "").startswith("pcm") and sample_rate and channels:
+                rate = sample_rate * channels * 16
+            else:
+                rate = _ASSUMED_AUDIO_BITRATE
+        # Never let a bogus stream rate exceed the container's.
+        container = int(info.get("bitrate") or 0)
+        if container > 0:
+            rate = min(rate, container)
+    return int(rate / 8 * duration)
 
 
 def extract_audio(src: Path, dst: Path, mode: str = "copy", *,

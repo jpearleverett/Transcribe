@@ -197,6 +197,91 @@ class ExtractPlanTest(unittest.TestCase):
             audio.extract_audio(silent, self.dir / "none.opus", "opus")
 
 
+class SizeEstimateTest(unittest.TestCase):
+    """Sizing the output from the audio track, not the whole file.
+
+    Regression: a 26 GB / 2:13:09 phone recording was refused with "about
+    28111 MB needed, 1775 MB free". The estimate had used the *container*
+    bitrate — video included — as though it were the audio rate, overshooting
+    by more than a hundredfold and blocking a job that needed ~200 MB.
+    """
+
+    # The real recording that failed.
+    DURATION = 2 * 3600 + 13 * 60 + 9
+    SIZE = 26 * 1000 ** 3
+
+    def real_info(self, audio_bitrate=192_000):
+        return {
+            "duration": float(self.DURATION),
+            "bitrate": int(self.SIZE * 8 / self.DURATION),   # ~26 Mbps
+            "audio_bitrate": audio_bitrate,
+            "codec": "aac", "sample_rate": 48000, "channels": 2,
+        }
+
+    def test_the_recording_that_failed_now_fits(self):
+        needed = audio.estimate_extract_bytes(self.real_info(), "copy", self.DURATION)
+        self.assertLess(needed, 400e6, "a 192 kbps track for 2h13m is about 190 MB")
+        self.assertGreater(needed, 100e6)
+        self.assertLess(needed, 1775e6, "must fit the free space it was refused for")
+
+    def test_container_bitrate_is_not_used(self):
+        info = self.real_info()
+        container_based = info["bitrate"] / 8 * self.DURATION
+        needed = audio.estimate_extract_bytes(info, "copy", self.DURATION)
+        self.assertLess(needed, container_based / 50,
+                        "using the container rate is the bug this guards")
+
+    def test_each_mode_is_sized_independently(self):
+        info = self.real_info()
+        sizes = {m: audio.estimate_extract_bytes(info, m, self.DURATION)
+                 for m in ("copy", "opus", "mp3", "wav")}
+        self.assertLess(sizes["opus"], sizes["mp3"])
+        self.assertLess(sizes["mp3"], sizes["wav"])
+        self.assertLess(sizes["opus"], 100e6, "Opus for 2h13m is well under 100 MB")
+
+    def test_missing_stream_rate_falls_back_sanely(self):
+        needed = audio.estimate_extract_bytes(self.real_info(0), "copy", self.DURATION)
+        self.assertLess(needed, 400e6, "the fallback must not reach for the container")
+        self.assertGreater(needed, 100e6, "and must not guess so low we run out")
+
+    def test_a_bogus_stream_rate_cannot_exceed_the_container(self):
+        info = self.real_info(audio_bitrate=99 * 10 ** 9)
+        needed = audio.estimate_extract_bytes(info, "copy", self.DURATION)
+        self.assertLessEqual(needed, self.SIZE * 1.01)
+
+    def test_lossless_source_is_sized_from_its_own_rate(self):
+        info = {"codec": "pcm_s16le", "audio_bitrate": 0,
+                "sample_rate": 48000, "channels": 2, "bitrate": 1536000}
+        needed = audio.estimate_extract_bytes(info, "copy", 60)
+        self.assertAlmostEqual(needed, 48000 * 2 * 2 * 60, delta=60000)
+
+    def test_zero_duration_does_not_divide_by_anything(self):
+        self.assertGreater(audio.estimate_extract_bytes(self.real_info(), "copy", 0), 0)
+
+
+@unittest.skipUnless(HAVE_FFMPEG, "needs ffmpeg")
+class ProbeBitrateTest(unittest.TestCase):
+    def test_probe_separates_audio_from_container(self):
+        d = Path(tempfile.mkdtemp(prefix="bitrate-"))
+        vid = d / "lopsided.mp4"
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "testsrc=size=1280x720:rate=30:duration=6",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=6",
+             "-c:v", "libx264", "-b:v", "8M", "-c:a", "aac", "-b:a", "192k",
+             "-shortest", "-y", str(vid)], check=True, capture_output=True)
+        info = audio.probe(vid)
+        self.assertGreater(info["audio_bitrate"], 0, "the audio rate must be reported")
+        self.assertLess(info["audio_bitrate"], info["bitrate"],
+                        "audio alone must be smaller than the whole container")
+
+        est = audio.estimate_extract_bytes(info, "copy", info["duration"])
+        out = audio.extract_audio(vid, d / "out.m4a", "copy")
+        actual = out.stat().st_size
+        self.assertLess(abs(est - actual), max(actual, 50_000),
+                        f"estimate {est} should be close to actual {actual}")
+
+
 @unittest.skipUnless(HAVE_FFMPEG, "needs ffmpeg")
 class LocalJobTest(unittest.TestCase):
     """End to end over HTTP, including the file the user must not lose."""
@@ -318,6 +403,21 @@ class LocalJobTest(unittest.TestCase):
                                {"path": str(self.video), "kind": "extract"})["job"]["id"])
         self.assertNotEqual(a["output_file"], b["output_file"])
         self.assertTrue(Path(a["output_file"]).exists())
+
+    def test_a_failed_extraction_leaves_no_partial_file(self):
+        """Half a file is worse than none when storage is nearly full."""
+        silent = self.media / "no-audio.mp4"
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "testsrc=size=64x64:rate=10:duration=2",
+             "-c:v", "libx264", "-y", str(silent)], check=True, capture_output=True)
+        before = set(self.out.iterdir())
+        created = self.req("/api/local", "POST",
+                           {"path": str(silent), "kind": "extract"})
+        self.wait(created["job"]["id"], "failed", timeout=60)
+        self.assertEqual(set(self.out.iterdir()), before,
+                         "a failed extraction must not leave a file behind")
+        silent.unlink()
 
     def test_rejects_a_path_outside_the_media_roots(self):
         with self.assertRaises(urllib.error.HTTPError) as cm:

@@ -53,15 +53,16 @@ def run_extract(job) -> None:
     out_dir = files_mod.output_dir()
     dest = _unique_path(out_dir / (source.stem + ext))
 
-    # A stream copy is roughly the size of the audio track; a transcode is
-    # smaller still. Either way it is a tiny fraction of the video, but check
-    # anyway — running a phone out of storage is a miserable failure mode.
-    needed = int((info.get("bitrate") or 128000) / 8 * max(duration, 1)) + (16 << 20)
+    # Size the output from the audio track, not the container — the container
+    # rate includes the video, which on a phone recording is over a hundred
+    # times larger and would refuse the job for space it never needed.
+    needed = audio_mod.estimate_extract_bytes(info, mode, duration) + (32 << 20)
     free = files_mod.free_bytes(out_dir)
     if free and free < needed:
         raise engines.EngineError(
-            f"Not enough space in {out_dir}: about {needed / 1e6:.0f} MB needed, "
-            f"{free / 1e6:.0f} MB free.")
+            f"Not enough space in {out_dir}: about {needed / 1e6:.0f} MB needed for "
+            f"the audio, {free / 1e6:.0f} MB free. Free some space, or pick the "
+            "'Small — Opus' output which is a fraction of the size.")
 
     store.add_log(job.id, f"Source: {audio_mod.format_duration(duration)}, "
                           f"{source.stat().st_size / 1e9:.1f} GB, "
@@ -71,11 +72,17 @@ def run_extract(job) -> None:
     store.add_log(job.id, f"Writing {dest}")
 
     started = time.time()
-    audio_mod.extract_audio(
-        source, dest, mode, duration=duration,
-        on_progress=lambda f: store.progress(job.id, "converting", 0.01 + 0.98 * f),
-        should_abort=lambda: store.is_cancelled(job.id),
-    )
+    try:
+        audio_mod.extract_audio(
+            source, dest, mode, duration=duration,
+            on_progress=lambda f: store.progress(job.id, "converting", 0.01 + 0.98 * f),
+            should_abort=lambda: store.is_cancelled(job.id),
+        )
+    except BaseException:
+        # A half-written file helps nobody and, on a phone already low on
+        # space, actively hurts. The estimate above is only an estimate.
+        dest.unlink(missing_ok=True)
+        raise
     if store.is_cancelled(job.id):
         dest.unlink(missing_ok=True)
         return

@@ -735,6 +735,15 @@ def serve(host: str = None, port: int = None) -> None:
     from .engines import registry  # noqa: F401
     jobs_mod.store().set_runner(runner.run_job)
 
+    # An upload is written to disk before the job that references it exists, so
+    # a process killed in between leaves a file nothing points at. Starting up
+    # is precisely when to notice, since it is the same event.
+    from . import storage
+    count, freed = storage.reap()
+    if count:
+        print(f"  Reclaimed {storage.human(freed)} from {count} interrupted "
+              f"upload(s).")
+
     loopback = host in ("127.0.0.1", "localhost", "::1")
     if not loopback:
         AUTH_TOKEN = os.environ.get("TRANSCRIBE_TOKEN") or secrets.token_urlsafe(16)

@@ -6,6 +6,8 @@
 #   ./run.sh --port 9000     use a different port
 #   ./run.sh --lan           also listen on the local network (prints a token)
 #   ./run.sh --check         diagnose the setup instead of starting
+#   ./run.sh --disk          show what the app is storing
+#   ./run.sh --clean         delete files left by interrupted uploads
 #
 set -euo pipefail
 
@@ -19,7 +21,7 @@ EXTRA=()
 
 # Diagnosis mode short-circuits everything else, including the wake lock.
 for arg in "$@"; do
-  if [ "$arg" = "--check" ]; then
+  if [ "$arg" = "--check" ] || [ "$arg" = "--disk" ] || [ "$arg" = "--clean" ]; then
     cd "$HERE" && exec "$PY" -m transcribe "$@"
   fi
 done

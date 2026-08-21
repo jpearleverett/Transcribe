@@ -280,6 +280,7 @@ holds under ±0.8 s of boundary jitter at 6.1%.
 transcribe/          the server
   align.py           word→speaker attribution and segmentation
   files.py           browsing device media, fenced to media folders
+  storage.py         disk accounting and reclaiming orphaned uploads
   doctor.py          the --check setup diagnosis
   exporters.py       SRT / VTT / TXT / MD / CSV / JSON
   server.py          HTTP, SSE, Range requests — stdlib only
@@ -291,7 +292,7 @@ transcribe/          the server
 web/                 the front end (no build step, no framework)
 gpu/                 the RunPod GPU worker
 tools/               diarize_sherpa.py — offline diarization helper
-tests/               268 tests, no network needed
+tests/               278 tests, no network needed
 ```
 
 Run the tests with `python3 -m unittest discover -s tests`. They need no
@@ -311,6 +312,20 @@ amount of server-side testing would have found.
 ---
 
 ## Troubleshooting
+
+**"Termux is using tens of gigabytes"** — almost certainly an interrupted
+upload. The app streams an upload to disk *before* creating the job that points
+at it, so a process killed in between (Android does kill Termux) leaves a file
+nothing references. A partly-uploaded video can be enormous.
+
+```bash
+./run.sh --disk       # where the space went
+./run.sh --clean      # delete files no transcript uses
+```
+
+The server now also reclaims these automatically each time it starts. For very
+large media, prefer the **Extract audio** tab or transcribing from the file
+browser — neither uploads anything, so neither can leave this behind.
 
 **Start here:** `./run.sh --check`. It walks the whole setup — Python, ffmpeg
 and whether it has the Opus encoder, wake locks, disk space, config file

@@ -136,12 +136,19 @@ def check_storage(rep):
                     f"chmod 600 {config.CONFIG_PATH}")
 
     try:
+        from . import storage
         st = os.statvfs(config.HOME)
         free_gb = st.f_bavail * st.f_frsize / 1e9
-        used = sum(f.stat().st_size for f in config.UPLOAD_DIR.glob("*") if f.is_file()) / 1e6
+        data = storage.report()
         level = OK if free_gb > 2 else (WARN if free_gb > 0.5 else BAD)
-        rep.add(level, f"{free_gb:.1f} GB free · {used:.0f} MB of stored audio",
-                "Delete old transcripts in the app to reclaim space." if level != OK else "")
+        rep.add(level,
+                f"{free_gb:.1f} GB free · the app is storing {storage.human(data['total'])}",
+                "Run  ./run.sh --disk  to see where it went." if level != OK else "")
+        if data["orphans"]:
+            rep.add(WARN,
+                    f"{storage.human(data['orphan_bytes'])} orphaned by interrupted "
+                    f"uploads ({len(data['orphans'])} file(s))",
+                    "./run.sh --clean")
     except OSError:
         pass
 

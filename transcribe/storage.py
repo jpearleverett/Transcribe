@@ -245,15 +245,26 @@ def scan_termux(top: int = 12, min_file_bytes: int = 64 << 20) -> dict:
                 continue
     big.sort(key=lambda e: -e["size"])
 
+    # Caches that are pure re-downloadable waste. npm's in particular grows
+    # without bound and is routinely the largest thing in a developer's home
+    # directory — larger, often, than every real project combined.
+    cache_specs = [
+        ("npm cache", home / ".npm", "npm cache clean --force"),
+        ("Termux temp files", prefix / "tmp", "rm -rf $PREFIX/tmp/*"),
+        ("apt package archives", prefix / "var/cache/apt/archives", "apt clean"),
+        ("pip cache", home / ".cache" / "pip", "rm -rf ~/.cache/pip"),
+        ("yarn cache", home / ".yarn" / "berry" / "cache", "yarn cache clean"),
+        ("cargo registry", home / ".cargo" / "registry", "rm -rf ~/.cargo/registry"),
+        ("Gradle cache", home / ".gradle" / "caches", "rm -rf ~/.gradle/caches"),
+    ]
     caches = []
-    for label, rel in (("apt package archives", "var/cache/apt/archives"),
-                       ("pip cache", None)):
-        path = (prefix / rel) if rel else (home / ".cache" / "pip")
+    for label, path, command in cache_specs:
         if path.is_dir():
             size, files = _walk_size(path)
             if size:
-                caches.append({"label": label, "path": str(path),
-                               "size": size, "files": files})
+                caches.append({"label": label, "path": str(path), "size": size,
+                               "files": files, "command": command})
+    caches.sort(key=lambda c: -c["size"])
 
     return {"areas": areas, "children": children[:top], "big_files": big[:top],
             "caches": caches, "total": sum(a["size"] for a in areas)}

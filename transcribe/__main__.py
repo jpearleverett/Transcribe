@@ -73,11 +73,10 @@ def _disk(clean: bool = False) -> int:
             print(f"      {human(f['size']):>10}  {_shorten(f['path'])}")
 
     if scan["caches"]:
-        print("\n  Caches you can clear safely:")
+        total = sum(c["size"] for c in scan["caches"])
+        print(f"\n  \033[32m{human(total)} is re-downloadable cache\033[0m — safe to delete:")
         for c in scan["caches"]:
-            print(f"      {human(c['size']):>10}  {c['label']}")
-        print("        apt clean                 # package archives")
-        print("        rm -rf ~/.cache/pip       # pip downloads")
+            print(f"      {human(c['size']):>10}  {c['label']:<22} {c['command']}")
 
     print("\n  Note: ~/storage/* are links to your shared storage (photos, Downloads).")
     print("  They are not counted here and are not part of Termux's own size.")

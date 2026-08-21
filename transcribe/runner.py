@@ -27,11 +27,85 @@ def _clean_intermediates(job_id: str) -> None:
 
 
 def run_job(job) -> None:
+    if job.kind == "extract":
+        return run_extract(job)
+    return run_transcription(job)
+
+
+def run_extract(job) -> None:
+    """Pull the audio track out of a local video, leaving the video alone."""
+    from . import files as files_mod
+
     store = jobs_mod.store()
     cfg = config.load()
     source = Path(job.audio_file)
     if not source.exists():
-        raise engines.EngineError("The uploaded audio is missing from disk.")
+        raise engines.EngineError("That video is no longer there.")
+
+    store.progress(job.id, "converting", 0.01)
+    info = audio_mod.probe(source)
+    duration = info.get("duration") or 0.0
+    if duration:
+        store.update(job.id, duration=duration)
+
+    mode = (job.options or {}).get("extract_mode") or cfg["extract_mode"]
+    ext, _args, _ = audio_mod.plan_extract(source, mode)
+    out_dir = files_mod.output_dir()
+    dest = _unique_path(out_dir / (source.stem + ext))
+
+    # A stream copy is roughly the size of the audio track; a transcode is
+    # smaller still. Either way it is a tiny fraction of the video, but check
+    # anyway — running a phone out of storage is a miserable failure mode.
+    needed = int((info.get("bitrate") or 128000) / 8 * max(duration, 1)) + (16 << 20)
+    free = files_mod.free_bytes(out_dir)
+    if free and free < needed:
+        raise engines.EngineError(
+            f"Not enough space in {out_dir}: about {needed / 1e6:.0f} MB needed, "
+            f"{free / 1e6:.0f} MB free.")
+
+    store.add_log(job.id, f"Source: {audio_mod.format_duration(duration)}, "
+                          f"{source.stat().st_size / 1e9:.1f} GB, "
+                          f"{info.get('codec') or 'unknown'} audio")
+    store.add_log(job.id, f"Mode: {mode}"
+                          + (" (no re-encoding)" if mode == "copy" else ""))
+    store.add_log(job.id, f"Writing {dest}")
+
+    started = time.time()
+    audio_mod.extract_audio(
+        source, dest, mode, duration=duration,
+        on_progress=lambda f: store.progress(job.id, "converting", 0.01 + 0.98 * f),
+        should_abort=lambda: store.is_cancelled(job.id),
+    )
+    if store.is_cancelled(job.id):
+        dest.unlink(missing_ok=True)
+        return
+
+    size = dest.stat().st_size
+    store.add_log(job.id, f"Done in {time.time() - started:.0f}s — "
+                          f"{size / 1e6:.0f} MB ({size / max(source.stat().st_size, 1):.1%} "
+                          "of the video)")
+    store.update(job.id, output_file=str(dest), size=size,
+                 model=mode, language=job.language)
+
+
+def _unique_path(path: Path) -> Path:
+    """Never overwrite something already in the user's Downloads."""
+    if not path.exists():
+        return path
+    stem, suffix = path.stem, path.suffix
+    for n in range(2, 1000):
+        candidate = path.with_name(f"{stem} ({n}){suffix}")
+        if not candidate.exists():
+            return candidate
+    return path.with_name(f"{stem}-{int(time.time())}{suffix}")
+
+
+def run_transcription(job) -> None:
+    store = jobs_mod.store()
+    cfg = config.load()
+    source = Path(job.audio_file)
+    if not source.exists():
+        raise engines.EngineError("The audio for this job is missing from disk.")
 
     engine = engines.get(job.engine or cfg["engine"])
     ok, reason = engine.available()
@@ -154,7 +228,7 @@ def run_job(job) -> None:
         speakers=job.speakers or {},
     )
 
-    if not cfg["keep_audio"]:
+    if not cfg["keep_audio"] and job.owns_audio:
         try:
             source.unlink(missing_ok=True)
             store.update(job.id, audio_file="")

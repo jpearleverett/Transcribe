@@ -189,3 +189,98 @@ def format_duration(seconds: float) -> str:
     total = int(seconds or 0)
     h, m, s = total // 3600, (total // 60) % 60, total % 60
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+# --------------------------------------------------------------------------
+# Extracting audio from video
+# --------------------------------------------------------------------------
+
+# Container each codec has to land in for a stream copy to be valid.
+_COPY_CONTAINER = {
+    "aac": ".m4a", "alac": ".m4a", "mp3": ".mp3", "opus": ".opus",
+    "vorbis": ".ogg", "flac": ".flac", "pcm_s16le": ".wav", "pcm_s24le": ".wav",
+    "ac3": ".ac3", "eac3": ".eac3", "dts": ".dts",
+}
+
+EXTRACT_MODES = {
+    "copy": "Original quality — copies the audio untouched, no re-encoding",
+    "opus": "Small — Opus, good for speech and a fraction of the size",
+    "mp3":  "MP3 — plays anywhere",
+    "wav":  "WAV 16 kHz mono — what transcription engines want",
+}
+
+
+def plan_extract(src: Path, mode: str = "copy") -> tuple:
+    """Decide the output extension and ffmpeg arguments for an extraction.
+
+    A stream copy is enormously the best option where it works: no quality
+    loss, no CPU, and on a multi-gigabyte video the job becomes a read rather
+    than a transcode. It is only valid if the codec has a container that can
+    hold it, so an unknown codec falls back to re-encoding rather than
+    producing a file that will not play.
+    """
+    info = probe(src)
+    codec = (info.get("codec") or "").lower()
+
+    if mode == "copy":
+        ext = _COPY_CONTAINER.get(codec)
+        if ext:
+            return ext, ["-vn", "-sn", "-dn", "-c:a", "copy"], info
+        mode = "opus"       # cannot copy this codec; compress instead
+
+    if mode == "mp3":
+        return ".mp3", ["-vn", "-sn", "-dn", "-c:a", "libmp3lame", "-q:a", "4"], info
+    if mode == "wav":
+        return ".wav", ["-vn", "-sn", "-dn", "-ac", "1", "-ar", "16000",
+                        "-c:a", "pcm_s16le"], info
+    return ".opus", ["-vn", "-sn", "-dn", "-ac", "1", "-ar", "16000",
+                     "-c:a", "libopus", "-b:a", "48k"], info
+
+
+def extract_audio(src: Path, dst: Path, mode: str = "copy", *,
+                  on_progress=None, duration: float = 0.0,
+                  should_abort=None) -> Path:
+    """Pull the audio out of a video without ever copying the video itself."""
+    if not FFMPEG:
+        raise AudioError("ffmpeg is not installed. In Termux run:  pkg install ffmpeg")
+
+    _, args, _info = plan_extract(src, mode)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error",
+           "-i", str(src), *args, "-progress", "pipe:1", "-nostats",
+           "-y", str(dst)]
+
+    err_file = tempfile.TemporaryFile(mode="w+")
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err_file, text=True)
+        try:
+            for line in proc.stdout:
+                if line.startswith("out_time_ms=") and duration > 0 and on_progress:
+                    try:
+                        done = int(line.split("=", 1)[1].strip()) / 1_000_000.0
+                        on_progress(min(1.0, done / duration))
+                    except ValueError:
+                        pass
+                if should_abort and should_abort():
+                    proc.terminate()
+                    raise AudioError("cancelled")
+            # No timeout: a stream copy still has to read the whole file, and
+            # tens of gigabytes off a phone's storage legitimately takes a while.
+            proc.wait()
+        finally:
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.poll() is None:
+                proc.kill()
+
+        if proc.returncode != 0:
+            err_file.seek(0)
+            raise AudioError("ffmpeg could not extract the audio: "
+                             + err_file.read().strip()[:500])
+    finally:
+        err_file.close()
+
+    if not dst.exists() or dst.stat().st_size == 0:
+        raise AudioError("Extraction produced an empty file — does this video have "
+                         "an audio track?")
+    return dst

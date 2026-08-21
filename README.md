@@ -44,6 +44,39 @@ standard library, so there is no pip step to fail on a phone.
 
 ---
 
+## Extracting audio from video
+
+The **Extract audio** tab browses the media already on your phone and pulls the
+audio out of a video, so you never upload it. That distinction matters: a
+two-hour 4K recording can be 30 GB, and putting that through the browser would
+have Chrome read all of it and the server write a *second* copy to the same
+phone — needing twice the space to accomplish nothing. ffmpeg reads the original
+where it sits and writes only the audio.
+
+Four output modes:
+
+| Mode | What it does | An hour of video |
+|---|---|---|
+| **Original quality** (default) | Copies the audio stream untouched — no re-encoding, no quality loss, barely any CPU | ~60-100 MB |
+| Small | Opus, 16 kHz mono — ideal for speech | ~20 MB |
+| MP3 | Plays anywhere | ~30 MB |
+| WAV | 16 kHz mono, what engines want | ~115 MB |
+
+Extracted audio lands in your **Downloads** folder, and an existing file is never
+overwritten. From the result you can transcribe it in one tap.
+
+Any media file in the browser can also be **transcribed directly**, skipping the
+upload. For anything large, prefer that over the file picker.
+
+Termux needs storage permission before it can see your videos:
+
+```bash
+termux-setup-storage      # then allow the Android permission
+```
+
+Nothing the app did not create is ever deleted — deleting a job removes only
+files it made, never your originals.
+
 ## Which engine should you use?
 
 | Engine | Speed for 1 hour of audio | Word-level speakers | Cost | Audio leaves the phone |
@@ -246,6 +279,7 @@ holds under ±0.8 s of boundary jitter at 6.1%.
 ```
 transcribe/          the server
   align.py           word→speaker attribution and segmentation
+  files.py           browsing device media, fenced to media folders
   doctor.py          the --check setup diagnosis
   exporters.py       SRT / VTT / TXT / MD / CSV / JSON
   server.py          HTTP, SSE, Range requests — stdlib only
@@ -257,7 +291,7 @@ transcribe/          the server
 web/                 the front end (no build step, no framework)
 gpu/                 the RunPod GPU worker
 tools/               diarize_sherpa.py — offline diarization helper
-tests/               218 tests, no network needed
+tests/               259 tests, no network needed
 ```
 
 Run the tests with `python3 -m unittest discover -s tests`. They need no

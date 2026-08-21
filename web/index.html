@@ -22,6 +22,35 @@
 
 <!-- ============ LIST VIEW ============ -->
 <main id="listView" class="view">
+  <div class="tabs" role="tablist">
+    <button class="tab active" id="tabTranscribe" role="tab" aria-selected="true">Transcribe</button>
+    <button class="tab" id="tabExtract" role="tab" aria-selected="false">Extract audio</button>
+  </div>
+
+  <section id="extractPanel" hidden>
+    <p class="hint">Pull the audio out of a video already on this phone. The video is
+      read where it sits and never copied, so size is not a problem.</p>
+
+    <div class="browser">
+      <div class="crumbs" id="crumbs"></div>
+      <div id="browseList" class="browse-list"></div>
+      <p class="empty" id="browseEmpty" hidden></p>
+    </div>
+
+    <details class="advanced">
+      <summary>Output</summary>
+      <label class="field">Format
+        <select id="extractMode">
+          <option value="copy">Original quality — copy the audio, no re-encoding (fastest)</option>
+          <option value="opus">Small — Opus, ideal for speech</option>
+          <option value="mp3">MP3 — plays anywhere</option>
+          <option value="wav">WAV 16 kHz mono — what engines want</option>
+        </select>
+      </label>
+      <p class="hint small" id="extractDest"></p>
+    </details>
+  </section>
+
   <section class="uploader" id="dropZone">
     <input type="file" id="fileInput" accept="audio/*,video/*,.m4a,.mp3,.wav,.ogg,.opus,.oga,.amr,.3gp,.aac,.flac,.mp4,.webm,.mkv,.mov,.wma,.aiff,.caf" hidden>
     <button class="pick-btn" id="pickBtn">
@@ -65,7 +94,7 @@
   </div>
 
   <section class="jobs">
-    <h2 class="section-title">Transcripts</h2>
+    <h2 class="section-title" id="jobsTitle">Transcripts</h2>
     <div id="jobList" class="job-list"></div>
     <p class="empty" id="emptyState">Nothing yet. Pick a file above to get started.</p>
   </section>

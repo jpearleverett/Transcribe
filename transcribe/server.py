@@ -22,8 +22,9 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import config, jobs as jobs_mod, runner
+from . import config, files as files_mod, jobs as jobs_mod, runner
 from .align import Segment, Word, merge_adjacent, speaker_stats
+from . import audio as audio_mod
 from .engines import base as engines
 from .exporters import export
 
@@ -196,6 +197,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"jobs": [j.public() for j in jobs_mod.store().list()]})
             if path == "/api/upload" and method == "POST":
                 return self.upload()
+            if path == "/api/browse" and method == "GET":
+                return self.browse()
+            if path == "/api/local" and method == "POST":
+                return self.local_job()
             if path == "/api/health":
                 return self.json({"ok": True, "version": VERSION,
                                   "queue": jobs_mod.store().queue_depth()})
@@ -305,6 +310,71 @@ class Handler(BaseHTTPRequestHandler):
         store.enqueue(job.id)
         return self.json({"job": job.public()}, 201)
 
+    # -------------------- local media --------------------
+
+    def browse(self):
+        try:
+            return self.json(files_mod.listing(self.query().get("path", "")))
+        except PermissionError as e:
+            return self.fail(str(e), 403)
+        except (NotADirectoryError, FileNotFoundError) as e:
+            return self.fail(str(e), 404)
+        except OSError as e:
+            return self.fail(f"Could not read that folder: {e}", 400)
+
+    def local_job(self):
+        """Start work on a file already on the device — no upload, no copy.
+
+        This is the only workable path for large video: uploading a 29 GB file
+        through the browser would make the phone hold a second copy of it to
+        achieve nothing, since ffmpeg can read the original in place.
+        """
+        body = self.read_json()
+        try:
+            source = files_mod.resolve_media(str(body.get("path") or ""))
+        except PermissionError as e:
+            return self.fail(str(e), 403)
+        except (FileNotFoundError, ValueError) as e:
+            return self.fail(str(e), 404)
+
+        kind = "extract" if body.get("kind") == "extract" else "transcribe"
+        store = jobs_mod.store()
+        options = {
+            "num_speakers": _int(body.get("num_speakers"), 0),
+            "extract_mode": str(body.get("extract_mode") or "") or None,
+        }
+        options = {k: v for k, v in options.items() if v not in (None, "")}
+
+        if kind == "transcribe":
+            engine_name = str(body.get("engine") or "") or config.load()["engine"]
+            try:
+                engine = engines.get(engine_name)
+            except engines.EngineError as e:
+                return self.fail(str(e))
+            ok, reason = engine.available()
+            if not ok:
+                return self.fail(reason or f"{engine.label} is not available.")
+            if engine.needs_key and not engine.has_key():
+                return self.fail(f"{engine.label} needs an API key. Add one in Settings.")
+        else:
+            engine_name = ""
+            if not audio_mod.have_ffmpeg():
+                return self.fail("ffmpeg is needed to extract audio. Run:  pkg install ffmpeg")
+
+        job = store.create(
+            name=source.name,
+            kind=kind,
+            engine=engine_name,
+            language=str(body.get("language") or "") or config.load()["language"],
+            size=source.stat().st_size,
+            audio_file=str(source),
+            owns_audio=False,          # the user's file; never delete it
+            media_type=mimetypes.guess_type(str(source))[0] or "",
+            options=options,
+        )
+        store.enqueue(job.id)
+        return self.json({"job": job.public()}, 201)
+
     # -------------------- per-job routes --------------------
 
     def job_route(self, method: str, job_id: str, action: str):
@@ -396,6 +466,11 @@ class Handler(BaseHTTPRequestHandler):
         if action == "audio":
             return self.audio(job, head_only=(method == "HEAD"))
 
+        if action == "output" and method in ("GET", "HEAD"):
+            if not job.output_file or not Path(job.output_file).exists():
+                return self.fail("That file is no longer there.", 404)
+            return self.send_file(Path(job.output_file), head_only=(method == "HEAD"))
+
         if action.startswith("export."):
             return self.export(job, action.split(".", 1)[1])
 
@@ -440,6 +515,35 @@ class Handler(BaseHTTPRequestHandler):
             fname = _safe_filename(job.name).rsplit(".", 1)[0] or "transcript"
             headers["Content-Disposition"] = f'attachment; filename="{fname}.{ext}"'
         self._send(200, body.encode("utf-8"), ctype, headers)
+
+    def send_file(self, path: Path, head_only: bool = False):
+        """Hand a produced file to the browser as a download."""
+        try:
+            fh = open(path, "rb")
+        except OSError:
+            return self.fail("That file could not be read.", 404)
+        try:
+            size = os.fstat(fh.fileno()).st_size
+            ctype = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{_safe_filename(path.name)}"')
+            self.end_headers()
+            if head_only:
+                return
+            while True:
+                chunk = fh.read(CHUNK)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except OSError:
+            self.close_connection = True
+        finally:
+            fh.close()
 
     def audio(self, job, head_only: bool = False):
         """Serve the original upload with Range support.

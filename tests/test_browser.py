@@ -113,6 +113,52 @@ class BrowserTest(unittest.TestCase):
 
     # ---------------- tests ----------------
 
+    def test_extract_tab_browses_device_media(self):
+        """The tab that avoids uploads entirely, driven end to end."""
+        import shutil
+        import subprocess
+        import tempfile
+        from transcribe import config
+
+        if not shutil.which("ffmpeg"):
+            self.skipTest("needs ffmpeg")
+
+        media = Path(tempfile.mkdtemp(prefix="phone-media-"))
+        out = Path(tempfile.mkdtemp(prefix="phone-out-"))
+        video = media / "recording.mp4"
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=5",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+             "-c:v", "libx264", "-c:a", "aac", "-shortest", "-y", str(video)],
+            check=True, capture_output=True)
+        config.save({"media_roots": [str(media)], "extract_dir": str(out)})
+        try:
+            self.page.reload(wait_until="networkidle")
+            self.assertFalse(self.page.locator("#extractPanel").is_visible())
+
+            self.page.click("#tabExtract")
+            self.page.wait_for_selector(".entry", timeout=10000)
+            self.assertTrue(self.page.locator("#extractPanel").is_visible())
+            self.assertFalse(self.page.locator("#dropZone").is_visible(),
+                             "the upload box belongs to the other tab")
+
+            self.page.locator(".entry", has_text=media.name).first.click()
+            self.page.wait_for_timeout(600)
+            self.assertTrue(self.page.locator(".entry", has_text="recording.mp4").count())
+
+            self.page.locator(".entry", has_text="recording.mp4").first.click()
+            self.page.wait_for_timeout(500)
+            self.page.fill("#promptInput", "1")
+            self.page.locator("#promptDialog button[value='ok']").click()
+
+            self.page.wait_for_selector("#dlOut", timeout=60000)
+            self.assertIn(".m4a", self.page.locator("#transcript").inner_text())
+            self.assertTrue(video.exists(), "extraction must not touch the source")
+            self.assertEqual(self.errors, [])
+        finally:
+            config.save({"media_roots": [], "extract_dir": ""})
+
     def test_boots_clean(self):
         self.assertEqual(self.page.title(), "Transcribe")
         self.assertGreaterEqual(self.page.locator("#engineSelect option").count(), 5)

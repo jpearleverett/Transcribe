@@ -30,6 +30,10 @@ DEFAULTS = {
     "port": 8756,
     "host": "127.0.0.1",
     "keep_audio": True,          # keep uploads so the player can seek
+    # Extracting audio from local video
+    "media_roots": [],           # extra folders to browse, beyond the defaults
+    "extract_dir": "",           # where extracted audio lands ("" = Downloads)
+    "extract_mode": "copy",      # copy | opus | mp3 | wav
     "max_upload_mb": 2048,
     # Local engine settings
     "local_model": "ggml-small.en-q5_1.bin",

@@ -391,9 +391,11 @@ function renderDetailHeader(job) {
   $('detailMeta').innerHTML = bits.map((b) => `<span>${esc(b)}</span>`).join('');
 
   const running = job.status === 'running' || job.status === 'pending';
+  const isExtract = job.kind === 'extract';
   $('progressPanel').hidden = !running;
   $('errorPanel').hidden = job.status !== 'failed' && job.status !== 'cancelled';
-  $('toolbar').hidden = job.status !== 'done';
+  $('toolbar').hidden = isExtract || job.status !== 'done';
+  if (isExtract && job.status === 'done') renderExtractResult(job);
 
   if (running) {
     $('stageLabel').textContent = STAGE_TEXT[job.stage] || job.stage;
@@ -418,8 +420,32 @@ function renderDetailHeader(job) {
   }
 }
 
+function renderExtractResult(job) {
+  const name = (job.output_file || '').split('/').pop();
+  $('transcript').innerHTML =
+    '<div class="progress-panel"><strong>Audio extracted</strong>'
+    + `<p class="hint">Saved to your device as <code>${esc(name)}</code> · ${esc(bytes(job.size))}</p>`
+    + '<button class="btn" id="dlOut">Save a copy</button> '
+    + '<button class="btn ghost" id="txOut">Transcribe it</button></div>';
+  $('dlOut').addEventListener('click', () => {
+    window.location.href = `/api/jobs/${job.id}/output`;
+  });
+  $('txOut').addEventListener('click', async () => {
+    try {
+      const data = await api('/api/local', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: job.output_file, kind: 'transcribe',
+                               engine: $('engineSelect').value }),
+      });
+      applyJob(data.job);
+      openJob(data.job.id);
+    } catch (e) { toast(e.message); }
+  });
+}
+
 async function refreshDetail(id) {
   const job = state.jobs.get(id);
+  if (job && job.kind === 'extract') return;   // extraction has no transcript
   if (job && job.status !== 'done') return;
   try {
     const data = await api(`/api/jobs/${id}/result?merged=${state.merged ? 1 : 0}`);
@@ -767,6 +793,134 @@ $('retryBtn').addEventListener('click', async () => {
 });
 
 /* ------------------------------------------------------------------ *
+ * Device file browser — for media too large to upload
+ * ------------------------------------------------------------------ */
+
+let browsePath = '';
+
+function showTab(which) {
+  const extract = which === 'extract';
+  $('tabExtract').classList.toggle('active', extract);
+  $('tabTranscribe').classList.toggle('active', !extract);
+  $('tabExtract').setAttribute('aria-selected', String(extract));
+  $('tabTranscribe').setAttribute('aria-selected', String(!extract));
+  $('extractPanel').hidden = !extract;
+  $('dropZone').hidden = extract;
+  $('jobsTitle').textContent = extract ? 'Recent' : 'Transcripts';
+  if (extract && !$('browseList').childElementCount) browse('');
+}
+
+$('tabTranscribe').addEventListener('click', () => showTab('transcribe'));
+$('tabExtract').addEventListener('click', () => showTab('extract'));
+
+async function browse(path) {
+  const list = $('browseList');
+  list.innerHTML = '<p class="empty">Loading…</p>';
+  let data;
+  try {
+    data = await api('/api/browse?path=' + encodeURIComponent(path || ''));
+  } catch (e) {
+    list.innerHTML = '';
+    $('browseEmpty').hidden = false;
+    $('browseEmpty').textContent = e.message;
+    return;
+  }
+  browsePath = data.path || '';
+  renderCrumbs(data);
+
+  list.innerHTML = '';
+  $('browseEmpty').hidden = true;
+
+  const rows = [];
+  if (!browsePath) {
+    if (!data.roots.length) {
+      $('browseEmpty').hidden = false;
+      $('browseEmpty').textContent =
+        'No media folders found. Run  termux-setup-storage  in Termux, allow the '
+        + 'permission, then reload this page.';
+      return;
+    }
+    data.roots.forEach((r) => rows.push({ name: r.label, path: r.path, dir: true }));
+  } else {
+    if (data.parent !== null) rows.push({ name: '..', path: data.parent, dir: true, up: true });
+    rows.push(...data.entries);
+  }
+
+  if (!rows.length || (rows.length === 1 && rows[0].up)) {
+    $('browseEmpty').hidden = false;
+    $('browseEmpty').textContent = 'No audio or video files in this folder.';
+  }
+
+  for (const item of rows) {
+    const el = document.createElement('button');
+    el.type = 'button';
+    el.className = 'entry' + (item.video ? ' video' : '');
+    const icon = item.dir ? (item.up ? '\u21a9' : '\u{1F4C1}')
+                          : (item.video ? '\u{1F3AC}' : '\u{1F3B5}');
+    el.innerHTML =
+      `<span class="icon">${icon}</span>`
+      + `<span class="name">${esc(item.name)}</span>`
+      + `<span class="meta">${item.dir ? '' : esc(bytes(item.size))}</span>`;
+    el.addEventListener('click', () => (item.dir ? browse(item.path) : pickLocal(item)));
+    list.appendChild(el);
+  }
+}
+
+function renderCrumbs(data) {
+  const el = $('crumbs');
+  el.innerHTML = '';
+  const home = document.createElement('button');
+  home.textContent = 'Storage';
+  home.addEventListener('click', () => browse(''));
+  el.appendChild(home);
+  if (!data.path) return;
+
+  const root = (data.roots || []).find((r) => data.path.startsWith(r.path));
+  const tail = root ? data.path.slice(root.path.length).split('/').filter(Boolean) : [];
+  const parts = root ? [{ label: root.label, path: root.path }]
+                     : [{ label: data.path, path: data.path }];
+  let acc = root ? root.path : '';
+  for (const seg of tail) {
+    acc += '/' + seg;
+    parts.push({ label: seg, path: acc });
+  }
+  for (const part of parts) {
+    const sep = document.createElement('span');
+    sep.className = 'sep';
+    sep.textContent = '/';
+    el.appendChild(sep);
+    const b = document.createElement('button');
+    b.textContent = part.label;
+    b.addEventListener('click', () => browse(part.path));
+    el.appendChild(b);
+  }
+}
+
+async function pickLocal(item) {
+  const choice = await ask(
+    item.name,
+    `${bytes(item.size)}\n\n1. Extract the audio to a file\n2. Transcribe it\n\nEnter a number`,
+    item.video ? '1' : '2');
+  if (choice !== '1' && choice !== '2') return;
+
+  const body = { path: item.path, kind: choice === '1' ? 'extract' : 'transcribe' };
+  if (choice === '1') {
+    body.extract_mode = $('extractMode').value;
+  } else {
+    body.engine = $('engineSelect').value;
+    body.num_speakers = $('speakersSelect').value;
+  }
+  try {
+    const data = await api('/api/local', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    applyJob(data.job);
+    openJob(data.job.id);
+  } catch (e) { toast(e.message); }
+}
+
+/* ------------------------------------------------------------------ *
  * Settings
  * ------------------------------------------------------------------ */
 
@@ -926,6 +1080,9 @@ async function boot() {
   fillLanguages($('languageSelect'), state.config.language);
   $('speakersSelect').value = String(state.config.num_speakers || 0);
   updateEngineNote();
+
+  const em = $('extractMode');
+  if (em) em.value = state.config.extract_mode || 'copy';
 
   await refreshJobs();
   connectLive();

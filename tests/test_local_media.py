@@ -1,0 +1,329 @@
+"""Browsing device media and extracting audio from local video.
+
+The point of this path is that nothing is uploaded and nothing is copied: a
+29 GB video read in place costs no extra disk, where an upload would make the
+phone hold a second copy of it to accomplish nothing.
+
+That makes one property safety-critical — the app must never delete a file the
+user already had.
+"""
+
+import json
+import math
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import urllib.error
+import urllib.parse
+import urllib.request
+import wave
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+os.environ["TRANSCRIBE_TEST"] = "1"
+os.environ.setdefault("TRANSCRIBE_HOME", tempfile.mkdtemp(prefix="transcribe-local-media-"))
+
+from http.server import ThreadingHTTPServer                          # noqa: E402
+from transcribe import audio, config, files, jobs as jobs_mod, runner, server  # noqa: E402
+from transcribe.engines import registry                              # noqa: E402
+
+HAVE_FFMPEG = audio.have_ffmpeg()
+
+_SAVED = {}
+_PATHS = ("HOME", "CONFIG_PATH", "UPLOAD_DIR", "JOB_DIR", "MODEL_DIR", "BIN_DIR")
+
+
+def setUpModule():
+    for attr in _PATHS:
+        _SAVED[attr] = getattr(config, attr)
+    home = Path(tempfile.mkdtemp(prefix="transcribe-lm-"))
+    config.HOME = home
+    config.CONFIG_PATH = home / "config.json"
+    config.UPLOAD_DIR = home / "uploads"
+    config.JOB_DIR = home / "jobs"
+    config.MODEL_DIR = home / "models"
+    config.BIN_DIR = home / "bin"
+    config.ensure_dirs()
+    config.load(force=True)
+
+
+def tearDownModule():
+    for attr, value in _SAVED.items():
+        setattr(config, attr, value)
+    config.load(force=True)
+
+
+def make_video(path, seconds=6.0):
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+         "-f", "lavfi", "-i", f"testsrc=size=320x240:rate=30:duration={seconds}",
+         "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+         "-c:v", "libx264", "-c:a", "aac", "-b:a", "160k", "-shortest",
+         "-y", str(path)], check=True, capture_output=True)
+    return path
+
+
+def make_wav(path, seconds=2.0):
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(b"".join(struct.pack("<h", int(8000 * math.sin(i / 12.0)))
+                               for i in range(int(16000 * seconds))))
+    return path
+
+
+class BrowseSafetyTest(unittest.TestCase):
+    """The browser is a filesystem exposed over HTTP; it must stay fenced."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.media = Path(tempfile.mkdtemp(prefix="media-root-"))
+        cls.outside = Path(tempfile.mkdtemp(prefix="outside-"))
+        (cls.outside / "secrets.txt").write_text("private")
+        (cls.media / "sub").mkdir()
+        make_wav(cls.media / "clip.wav")
+        (cls.media / "notes.txt").write_text("not media")
+        (cls.media / ".hidden.wav").write_bytes(b"x")
+        config.save({"media_roots": [str(cls.media)]})
+
+    @classmethod
+    def tearDownClass(cls):
+        config.save({"media_roots": []})
+        shutil.rmtree(cls.media, ignore_errors=True)
+        shutil.rmtree(cls.outside, ignore_errors=True)
+
+    def test_root_is_listed(self):
+        paths = [r["path"] for r in files.roots()]
+        self.assertIn(str(self.media.resolve()), paths)
+
+    def test_lists_only_media_and_folders(self):
+        names = [e["name"] for e in files.listing(str(self.media))["entries"]]
+        self.assertIn("clip.wav", names)
+        self.assertIn("sub", names)
+        self.assertNotIn("notes.txt", names, "non-media must not be listed")
+        self.assertNotIn(".hidden.wav", names, "dotfiles must not be listed")
+
+    def test_traversal_is_refused(self):
+        for attempt in (str(self.media / ".." / ".."), "/etc", str(self.outside), "/"):
+            with self.assertRaises(PermissionError, msg=attempt):
+                files.listing(attempt)
+
+    def test_symlink_out_of_the_root_is_refused(self):
+        link = self.media / "escape"
+        try:
+            link.symlink_to(self.outside)
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        try:
+            # Resolved before checking, so the link cannot smuggle us out.
+            with self.assertRaises(PermissionError):
+                files.listing(str(link))
+        finally:
+            link.unlink()
+
+    def test_resolve_media_rejects_non_media(self):
+        with self.assertRaises(ValueError):
+            files.resolve_media(str(self.media / "notes.txt"))
+
+    def test_resolve_media_rejects_outside(self):
+        with self.assertRaises(PermissionError):
+            files.resolve_media(str(self.outside / "secrets.txt"))
+
+    def test_resolve_media_accepts_a_real_file(self):
+        self.assertEqual(files.resolve_media(str(self.media / "clip.wav")).name, "clip.wav")
+
+
+@unittest.skipUnless(HAVE_FFMPEG, "needs ffmpeg")
+class ExtractPlanTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = Path(tempfile.mkdtemp(prefix="extract-plan-"))
+        cls.video = make_video(cls.dir / "clip.mp4")
+
+    def test_copy_picks_a_container_the_codec_fits(self):
+        ext, args, info = audio.plan_extract(self.video, "copy")
+        self.assertEqual(ext, ".m4a", "AAC belongs in an MP4 container")
+        self.assertIn("copy", args)
+        self.assertEqual(info["codec"], "aac")
+
+    def test_copy_falls_back_when_the_codec_has_no_container(self):
+        # A codec with no known container must re-encode rather than produce a
+        # file that will not play.
+        original = audio._COPY_CONTAINER.copy()
+        audio._COPY_CONTAINER.clear()
+        try:
+            ext, args, _ = audio.plan_extract(self.video, "copy")
+            self.assertEqual(ext, ".opus")
+            self.assertNotIn("copy", args)
+        finally:
+            audio._COPY_CONTAINER.update(original)
+
+    def test_every_mode_produces_playable_audio(self):
+        for mode, ext in (("copy", ".m4a"), ("opus", ".opus"),
+                          ("mp3", ".mp3"), ("wav", ".wav")):
+            out = audio.extract_audio(self.video, self.dir / f"o_{mode}{ext}", mode,
+                                      duration=6.0)
+            info = audio.probe(out)
+            self.assertAlmostEqual(info["duration"], 6.0, delta=1.0, msg=mode)
+            self.assertGreater(out.stat().st_size, 1000, mode)
+
+    def test_copy_is_smaller_than_the_video_and_keeps_the_codec(self):
+        out = audio.extract_audio(self.video, self.dir / "copy.m4a", "copy")
+        self.assertLess(out.stat().st_size, self.video.stat().st_size)
+        self.assertEqual(audio.probe(out)["codec"], "aac", "copy must not re-encode")
+
+    def test_progress_is_reported(self):
+        seen = []
+        audio.extract_audio(self.video, self.dir / "p.opus", "opus",
+                            duration=6.0, on_progress=seen.append)
+        self.assertTrue(seen)
+        self.assertLessEqual(max(seen), 1.0)
+
+    def test_video_with_no_audio_track_is_a_clear_error(self):
+        silent = self.dir / "silent.mp4"
+        subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                        "-f", "lavfi", "-i", "testsrc=size=64x64:rate=10:duration=2",
+                        "-c:v", "libx264", "-y", str(silent)],
+                       check=True, capture_output=True)
+        with self.assertRaises(audio.AudioError):
+            audio.extract_audio(silent, self.dir / "none.opus", "opus")
+
+
+@unittest.skipUnless(HAVE_FFMPEG, "needs ffmpeg")
+class LocalJobTest(unittest.TestCase):
+    """End to end over HTTP, including the file the user must not lose."""
+
+    @classmethod
+    def setUpClass(cls):
+        jobs_mod.store().set_runner(runner.run_job)
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        cls.httpd.daemon_threads = True
+        cls.port = cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+        cls.media = Path(tempfile.mkdtemp(prefix="user-media-"))
+        cls.out = Path(tempfile.mkdtemp(prefix="user-out-"))
+        cls.video = make_video(cls.media / "long meeting.mp4")
+        config.save({"media_roots": [str(cls.media)], "extract_dir": str(cls.out)})
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        config.save({"media_roots": [], "extract_dir": ""})
+
+    def req(self, path, method="GET", body=None):
+        data = json.dumps(body).encode() if body is not None else None
+        headers = {"Content-Type": "application/json"} if data else {}
+        r = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}",
+                                   data=data, method=method, headers=headers)
+        with urllib.request.urlopen(r, timeout=60) as resp:
+            raw = resp.read()
+            return json.loads(raw) if raw else {}
+
+    def wait(self, job_id, status="done", timeout=120):
+        end = time.time() + timeout
+        while time.time() < end:
+            job = self.req(f"/api/jobs/{job_id}")["job"]
+            if job["status"] == status:
+                return job
+            if job["status"] in ("failed", "cancelled") and status == "done":
+                self.fail(f"job failed: {job['error']}")
+            time.sleep(0.15)
+        self.fail(f"never reached {status}")
+
+    def test_browse_over_http(self):
+        data = self.req("/api/browse?path=" + urllib.parse.quote(str(self.media)))
+        names = [e["name"] for e in data["entries"]]
+        self.assertIn("long meeting.mp4", names)
+        entry = next(e for e in data["entries"] if e["name"] == "long meeting.mp4")
+        self.assertTrue(entry["video"])
+        self.assertGreater(entry["size"], 0)
+
+    def test_browse_refuses_outside_paths(self):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self.req("/api/browse?path=/etc")
+        self.assertEqual(cm.exception.code, 403)
+
+    def test_extract_then_the_source_video_survives(self):
+        """The whole point: extraction must not touch the user's video."""
+        before = self.video.stat()
+        created = self.req("/api/local", "POST",
+                           {"path": str(self.video), "kind": "extract",
+                            "extract_mode": "copy"})
+        job = self.wait(created["job"]["id"])
+
+        out = Path(job["output_file"])
+        self.assertTrue(out.exists())
+        self.assertEqual(out.parent, self.out, "must land in the configured folder")
+        self.assertEqual(out.suffix, ".m4a")
+        self.assertLess(out.stat().st_size, before.st_size)
+
+        self.assertTrue(self.video.exists(), "the source video must still be there")
+        self.assertEqual(self.video.stat().st_size, before.st_size)
+
+    def test_deleting_the_job_never_deletes_the_users_video(self):
+        created = self.req("/api/local", "POST",
+                           {"path": str(self.video), "kind": "extract"})
+        job_id = created["job"]["id"]
+        self.wait(job_id)
+        self.req(f"/api/jobs/{job_id}", "DELETE")
+        self.assertTrue(self.video.exists(),
+                        "deleting a job must never remove a file the user owns")
+
+    def test_extraction_does_not_copy_the_video(self):
+        """No second copy of the source may appear anywhere we manage."""
+        created = self.req("/api/local", "POST",
+                           {"path": str(self.video), "kind": "extract"})
+        self.wait(created["job"]["id"])
+        for d in (config.UPLOAD_DIR, config.HOME):
+            for f in d.rglob("*"):
+                if f.is_file():
+                    self.assertLess(f.stat().st_size, self.video.stat().st_size,
+                                    f"{f} looks like a copy of the source video")
+
+    def test_transcribe_a_local_file_without_uploading(self):
+        created = self.req("/api/local", "POST",
+                           {"path": str(self.video), "kind": "transcribe",
+                            "engine": "mock"})
+        job = self.wait(created["job"]["id"])
+        self.assertEqual(job["kind"], "transcribe")
+        result = self.req(f"/api/jobs/{job['id']}/result")
+        self.assertTrue(result["segments"])
+        self.assertTrue(self.video.exists(), "transcribing must not consume the source")
+
+    def test_output_downloads(self):
+        created = self.req("/api/local", "POST",
+                           {"path": str(self.video), "kind": "extract"})
+        job = self.wait(created["job"]["id"])
+        r = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/jobs/{job['id']}/output")
+        with urllib.request.urlopen(r, timeout=60) as resp:
+            body = resp.read()
+            self.assertIn("attachment", resp.headers["Content-Disposition"])
+        self.assertEqual(len(body), Path(job["output_file"]).stat().st_size)
+
+    def test_repeat_extraction_does_not_overwrite(self):
+        a = self.wait(self.req("/api/local", "POST",
+                               {"path": str(self.video), "kind": "extract"})["job"]["id"])
+        b = self.wait(self.req("/api/local", "POST",
+                               {"path": str(self.video), "kind": "extract"})["job"]["id"])
+        self.assertNotEqual(a["output_file"], b["output_file"])
+        self.assertTrue(Path(a["output_file"]).exists())
+
+    def test_rejects_a_path_outside_the_media_roots(self):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self.req("/api/local", "POST", {"path": "/etc/hosts", "kind": "extract"})
+        self.assertIn(cm.exception.code, (403, 404))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -67,10 +67,25 @@ class HiddenAttributeTest(unittest.TestCase):
 
 class DomContractTest(unittest.TestCase):
     def test_every_referenced_id_exists(self):
+        """Every $('id') must resolve — in the HTML, or in markup JS builds.
+
+        Ids created at runtime count as declared, but only if they are really
+        created: the JS-side set is scraped from `id="..."` in the script, so a
+        typo in either half still fails rather than being whitelisted away.
+        """
         referenced = set(re.findall(r"\$\('([^']+)'\)", JS))
-        present = set(re.findall(r'\bid="([^"]+)"', HTML))
-        missing = sorted(referenced - present)
-        self.assertEqual(missing, [], f"app.js references ids not in the HTML: {missing}")
+        in_html = set(re.findall(r'\bid="([^"]+)"', HTML))
+        built_by_js = set(re.findall(r'\bid="([^"$]+)"', JS))
+        missing = sorted(referenced - in_html - built_by_js)
+        self.assertEqual(missing, [],
+                         f"app.js references ids that nothing creates: {missing}")
+
+    def test_runtime_built_ids_are_actually_used(self):
+        """Markup that declares an id nothing queries is dead weight."""
+        built_by_js = set(re.findall(r'\bid="([^"$]+)"', JS))
+        referenced = set(re.findall(r"\$\('([^']+)'\)", JS))
+        orphans = sorted(built_by_js - referenced)
+        self.assertEqual(orphans, [], f"ids built but never used: {orphans}")
 
     def test_static_assets_referenced_exist(self):
         for href in re.findall(r'(?:href|src)="/static/([^"]+)"', HTML):

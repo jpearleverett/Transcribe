@@ -46,8 +46,15 @@ class Job:
     duration: float = 0.0
     size: int = 0
     error: str = ""
-    audio_file: str = ""       # original upload, served to the <audio> player
+    audio_file: str = ""       # the media this job reads, served to the player
     media_type: str = ""
+    # False when audio_file is a file the user already had on their device
+    # rather than something we created. Nothing we did not create is ever
+    # deleted — a job pointed at a 29 GB video in Movies must not be able to
+    # remove it.
+    owns_audio: bool = True
+    kind: str = "transcribe"   # or "extract"
+    output_file: str = ""      # for extract jobs: what we produced
     speakers: dict = field(default_factory=dict)   # label -> user-given name
     options: dict = field(default_factory=dict)
     log: list = field(default_factory=list)
@@ -177,7 +184,7 @@ class JobStore:
                 p.unlink(missing_ok=True)
             except OSError:
                 pass
-        if job.audio_file:
+        if job.audio_file and job.owns_audio:
             try:
                 Path(job.audio_file).unlink(missing_ok=True)
             except OSError:

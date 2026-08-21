@@ -109,6 +109,37 @@ class OrphanTest(unittest.TestCase):
         self.assertEqual(len(storage.orphans()), 1)
 
 
+class RecentSkipTest(unittest.TestCase):
+    """A file skipped for being young must be reported, not silently ignored."""
+
+    def setUp(self):
+        for f in config.UPLOAD_DIR.glob("*"):
+            f.unlink()
+        for job in jobs_mod.store().list():
+            jobs_mod.store().delete(job.id)
+
+    def test_a_young_orphan_is_listed_as_recent(self):
+        make_upload("just-uploaded.mp4", 8000, age_hours=0)
+        self.assertEqual(storage.orphans(), [], "too young to reap")
+        recent = storage.recent_unreferenced()
+        self.assertEqual(len(recent), 1)
+        self.assertEqual(recent[0]["size"], 8000)
+        self.assertIn("recent", storage.report())
+        self.assertEqual(len(storage.report()["recent"]), 1)
+
+    def test_an_old_orphan_is_not_double_counted(self):
+        make_upload("old.mp4", 9000, age_hours=5)
+        self.assertEqual(len(storage.orphans()), 1)
+        self.assertEqual(storage.recent_unreferenced(), [],
+                         "an old file belongs to orphans, not recent")
+
+    def test_a_referenced_young_file_is_neither(self):
+        path = make_upload("in-use.wav", 4000, age_hours=0)
+        jobs_mod.store().create(name="in-use", audio_file=str(path))
+        self.assertEqual(storage.orphans(), [])
+        self.assertEqual(storage.recent_unreferenced(), [])
+
+
 class ReportTest(unittest.TestCase):
     def setUp(self):
         for f in config.UPLOAD_DIR.glob("*"):

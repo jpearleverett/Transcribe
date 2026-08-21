@@ -37,6 +37,15 @@ def _disk(clean: bool = False) -> int:
     elif clean:
         print("\n  Nothing orphaned to clean up.")
 
+    if data.get("recent"):
+        total = sum(r["size"] for r in data["recent"])
+        print(f"\n  {human(total)} is unreferenced but less than an hour old, so it is")
+        print("  left alone in case an upload is still arriving:")
+        for r in data["recent"][:5]:
+            print(f"      {human(r['size']):>10}  {r['name'][:52]}  ({r['age'] / 60:.0f} min old)")
+        print("  Re-run once it has aged, or delete it directly:")
+        print(f"      rm '{config.UPLOAD_DIR}/<name>'")
+
     build = next((p for p in data["parts"] if p["label"] == "Build tree"), None)
     if build and build["size"] > 500 << 20:
         print(f"\n  The build tree is {human(build['size'])}. It is only needed to rebuild")

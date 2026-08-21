@@ -46,6 +46,29 @@ def referenced_files() -> set:
     return keep
 
 
+def recent_unreferenced(min_age: float = ORPHAN_MIN_AGE) -> list:
+    """Unreferenced files too young to reap — possibly still being uploaded.
+
+    Reported rather than silently skipped: a user who just saw a huge file in
+    --disk and then gets "nothing to clean up" would reasonably conclude the
+    tool is broken.
+    """
+    keep = referenced_files()
+    now = time.time()
+    found = []
+    for path in config.UPLOAD_DIR.glob("*"):
+        if not path.is_file():
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if str(path.resolve()) in keep or now - stat.st_mtime >= min_age:
+            continue
+        found.append({"path": path, "size": stat.st_size, "age": now - stat.st_mtime})
+    return sorted(found, key=lambda e: -e["size"])
+
+
 def orphans(min_age: float = ORPHAN_MIN_AGE) -> list:
     """Files in the upload directory that no job references.
 
@@ -99,6 +122,7 @@ def report() -> dict:
                       "files": count, "note": note})
 
     stray = orphans()
+    young = recent_unreferenced()
     total = sum(p["size"] for p in parts)
     return {
         "parts": parts,
@@ -106,6 +130,8 @@ def report() -> dict:
         "orphans": [{"name": o["path"].name, "size": o["size"], "age": o["age"]}
                     for o in stray],
         "orphan_bytes": sum(o["size"] for o in stray),
+        "recent": [{"name": o["path"].name, "size": o["size"], "age": o["age"]}
+                   for o in young],
         "home": str(config.HOME),
     }
 

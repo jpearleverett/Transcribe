@@ -138,5 +138,81 @@ class ReportTest(unittest.TestCase):
         config.ensure_dirs()
 
 
+class TermuxScanTest(unittest.TestCase):
+    """Accounting for Termux's own footprint, and only its own.
+
+    ~/storage/* are symlinks into shared storage. Following them would walk the
+    entire phone and attribute the user's photos and videos to Termux — wrong,
+    and slow enough to look hung on a large device.
+    """
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="fake-home-"))
+        self.shared = Path(tempfile.mkdtemp(prefix="fake-shared-"))
+        # A big file that belongs to the user, not to Termux.
+        with open(self.shared / "PXL_video.mp4", "wb") as f:
+            f.truncate(8 * 1024 ** 3)
+        (self.home / "real").mkdir()
+        (self.home / "real" / "data.bin").write_bytes(b"0" * 5000)
+        self._saved_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(self.home)
+
+    def tearDown(self):
+        if self._saved_home is not None:
+            os.environ["HOME"] = self._saved_home
+        import shutil
+        shutil.rmtree(self.home, ignore_errors=True)
+        shutil.rmtree(self.shared, ignore_errors=True)
+
+    def test_storage_symlinks_are_not_counted(self):
+        storage_dir = self.home / "storage"
+        storage_dir.mkdir()
+        try:
+            (storage_dir / "shared").symlink_to(self.shared)
+        except OSError:
+            self.skipTest("symlinks unavailable")
+
+        scan = storage.scan_termux()
+        home_area = next(a for a in scan["areas"] if a["label"].startswith("Home"))
+        self.assertLess(home_area["size"], 1 << 20,
+                        "the user's 8 GB video must not be attributed to Termux")
+        names = [c["name"] for c in scan["children"]]
+        self.assertNotIn("storage/", names)
+
+    def test_a_symlink_anywhere_is_not_followed(self):
+        """Not just ~/storage — any symlink could leave the tree."""
+        try:
+            (self.home / "sneaky").symlink_to(self.shared)
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        scan = storage.scan_termux()
+        home_area = next(a for a in scan["areas"] if a["label"].startswith("Home"))
+        self.assertLess(home_area["size"], 1 << 20)
+
+    def test_real_content_is_counted(self):
+        scan = storage.scan_termux()
+        home_area = next(a for a in scan["areas"] if a["label"].startswith("Home"))
+        self.assertGreaterEqual(home_area["size"], 5000)
+        self.assertIn("real/", [c["name"] for c in scan["children"]])
+
+    def test_large_files_are_listed(self):
+        big = self.home / "real" / "huge.bin"
+        with open(big, "wb") as f:
+            f.truncate(200 << 20)
+        scan = storage.scan_termux(min_file_bytes=64 << 20)
+        self.assertTrue(any(f["path"].endswith("huge.bin") for f in scan["big_files"]))
+
+    def test_unreadable_directories_do_not_break_the_scan(self):
+        locked = self.home / "locked"
+        locked.mkdir()
+        (locked / "x").write_bytes(b"0" * 100)
+        os.chmod(locked, 0o000)
+        try:
+            scan = storage.scan_termux()      # must not raise
+            self.assertTrue(scan["areas"])
+        finally:
+            os.chmod(locked, 0o755)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

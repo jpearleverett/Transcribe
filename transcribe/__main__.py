@@ -1,6 +1,7 @@
 """Entry point: python -m transcribe"""
 
 import argparse
+import os
 import sys
 
 from . import config, server
@@ -42,11 +43,47 @@ def _disk(clean: bool = False) -> int:
         print(f"  the offline engine, so it is safe to delete:")
         print(f"      rm -rf {build['path']}")
 
-    print("\n  Termux's own size also includes its Linux packages and caches:")
-    print("      du -sh $PREFIX $HOME 2>/dev/null")
-    print("      apt clean          # clears downloaded package archives")
+    # Android reports one figure for the whole Termux install, so account for
+    # all of it rather than only the part this app wrote.
+    print("\n\033[1mAll of Termux\033[0m (what Android's app-size figure covers)\n")
+    scan = storage.scan_termux()
+    for area in scan["areas"]:
+        print(f"  {human(area['size']):>10}  {area['label']:<26} {area['files']:>6} files")
+    print(f"  {human(scan['total']):>10}  \033[1mtotal\033[0m")
+
+    if scan["children"]:
+        print("\n  Biggest things in your home directory:")
+        for child in scan["children"]:
+            if child["size"] < 1 << 20:
+                continue
+            print(f"      {human(child['size']):>10}  {child['name'][:52]}")
+
+    if scan["big_files"]:
+        print("\n  Individual files over 64 MB:")
+        for f in scan["big_files"]:
+            print(f"      {human(f['size']):>10}  {_shorten(f['path'])}")
+
+    if scan["caches"]:
+        print("\n  Caches you can clear safely:")
+        for c in scan["caches"]:
+            print(f"      {human(c['size']):>10}  {c['label']}")
+        print("        apt clean                 # package archives")
+        print("        rm -rf ~/.cache/pip       # pip downloads")
+
+    print("\n  Note: ~/storage/* are links to your shared storage (photos, Downloads).")
+    print("  They are not counted here and are not part of Termux's own size.")
     print()
     return 0
+
+
+def _shorten(path: str, width: int = 58) -> str:
+    home = os.path.expanduser("~")
+    prefix = os.environ.get("PREFIX", "")
+    if prefix and path.startswith(prefix):
+        path = "$PREFIX" + path[len(prefix):]
+    elif path.startswith(home):
+        path = "~" + path[len(home):]
+    return path if len(path) <= width else "…" + path[-(width - 1):]
 
 
 def main(argv=None) -> int:

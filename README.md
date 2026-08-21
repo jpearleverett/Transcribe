@@ -292,7 +292,7 @@ transcribe/          the server
 web/                 the front end (no build step, no framework)
 gpu/                 the RunPod GPU worker
 tools/               diarize_sherpa.py — offline diarization helper
-tests/               278 tests, no network needed
+tests/               283 tests, no network needed
 ```
 
 Run the tests with `python3 -m unittest discover -s tests`. They need no
@@ -319,9 +319,15 @@ at it, so a process killed in between (Android does kill Termux) leaves a file
 nothing references. A partly-uploaded video can be enormous.
 
 ```bash
-./run.sh --disk       # where the space went
+./run.sh --disk       # where the space went — all of Termux, not just this app
 ./run.sh --clean      # delete files no transcript uses
 ```
+
+`--disk` accounts for the whole Termux install, which is what Android's app-size
+figure covers: the app's own storage, your home directory's biggest folders,
+every individual file over 64 MB, and the package caches. `~/storage/*` are
+symlinks to your shared storage, so they are deliberately excluded — your photos
+and videos are not part of Termux's size.
 
 The server now also reclaims these automatically each time it starts. For very
 large media, prefer the **Extract audio** tab or transcribing from the file

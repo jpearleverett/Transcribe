@@ -116,3 +116,118 @@ def human(n: float) -> str:
             return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} GB"
+
+
+# --------------------------------------------------------------------------
+# What is Termux itself holding?
+# --------------------------------------------------------------------------
+
+# ~/storage/* are symlinks into shared storage. Following them would walk the
+# whole phone and attribute the user's photos and videos to Termux, which is
+# both wrong and slow.
+SKIP_DIR_NAMES = {"storage"}
+
+
+def _walk_size(path: Path, skip_names=SKIP_DIR_NAMES) -> tuple:
+    """(bytes, files) under `path`, never following symlinks out of it."""
+    total = files = 0
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    try:
+                        if entry.is_symlink():
+                            continue        # never follow: may leave the tree
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name in skip_names:
+                                continue
+                            stack.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                            files += 1
+                    except OSError:
+                        continue
+        except (OSError, PermissionError):
+            continue
+    return total, files
+
+
+def scan_termux(top: int = 12, min_file_bytes: int = 64 << 20) -> dict:
+    """Where Termux's own footprint has gone.
+
+    Answers the question the Android settings screen raises but cannot: the
+    figure it shows covers the whole Termux install — its Linux userland, its
+    package caches, and everything under the home directory.
+    """
+    home = Path(os.path.expanduser("~"))
+    prefix = Path(os.environ.get("PREFIX", "/data/data/com.termux/files/usr"))
+
+    areas = []
+    for label, path in (("Home (~)", home), ("Linux packages ($PREFIX)", prefix)):
+        if not path.is_dir():
+            continue
+        size, files = _walk_size(path)
+        areas.append({"label": label, "path": str(path), "size": size, "files": files})
+
+    # The biggest immediate children of home, which is where user data lives.
+    children = []
+    try:
+        with os.scandir(home) as it:
+            for entry in it:
+                try:
+                    if entry.is_symlink() or entry.name in SKIP_DIR_NAMES:
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        size, files = _walk_size(Path(entry.path))
+                        children.append({"name": entry.name + "/", "path": entry.path,
+                                         "size": size, "files": files})
+                    elif entry.is_file(follow_symlinks=False):
+                        children.append({"name": entry.name, "path": entry.path,
+                                         "size": entry.stat().st_size, "files": 1})
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    children.sort(key=lambda e: -e["size"])
+
+    # Individual files big enough to matter on their own.
+    big = []
+    for root in (home, prefix):
+        if not root.is_dir():
+            continue
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            try:
+                with os.scandir(current) as it:
+                    for entry in it:
+                        try:
+                            if entry.is_symlink():
+                                continue
+                            if entry.is_dir(follow_symlinks=False):
+                                if entry.name not in SKIP_DIR_NAMES:
+                                    stack.append(Path(entry.path))
+                            elif entry.is_file(follow_symlinks=False):
+                                size = entry.stat(follow_symlinks=False).st_size
+                                if size >= min_file_bytes:
+                                    big.append({"path": entry.path, "size": size})
+                        except OSError:
+                            continue
+            except (OSError, PermissionError):
+                continue
+    big.sort(key=lambda e: -e["size"])
+
+    caches = []
+    for label, rel in (("apt package archives", "var/cache/apt/archives"),
+                       ("pip cache", None)):
+        path = (prefix / rel) if rel else (home / ".cache" / "pip")
+        if path.is_dir():
+            size, files = _walk_size(path)
+            if size:
+                caches.append({"label": label, "path": str(path),
+                               "size": size, "files": files})
+
+    return {"areas": areas, "children": children[:top], "big_files": big[:top],
+            "caches": caches, "total": sum(a["size"] for a in areas)}

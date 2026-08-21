@@ -552,6 +552,34 @@ class ServerTest(unittest.TestCase):
         data = self.req("/api/health", headers={"Origin": "https://evil.example"})
         self.assertTrue(data["ok"])
 
+    def test_18m_rerun_does_not_duplicate_the_audio(self):
+        """A second opinion should not cost a second copy of the recording."""
+        import os as _os
+        created = self.upload(name="compare.wav")
+        first = created["job"]["id"]
+        self.wait_for(first)
+
+        data = self.req(f"/api/jobs/{first}/rerun", "POST",
+                        json.dumps({"engine": "mock"}).encode(),
+                        {"Content-Type": "application/json"})
+        second = data["job"]["id"]
+        self.wait_for(second)
+
+        a = Path(jobs_mod.store().get(first).audio_file)
+        b = Path(jobs_mod.store().get(second).audio_file)
+        self.assertNotEqual(a, b, "each job keeps its own path")
+        if hasattr(_os, "link"):
+            self.assertEqual(a.stat().st_ino, b.stat().st_ino,
+                             "the second job should share the bytes, not copy them")
+
+        # Deleting one must leave the other playable — the reason it was a copy.
+        self.req(f"/api/jobs/{first}", "DELETE")
+        self.assertFalse(a.exists())
+        self.assertTrue(b.exists(), "the surviving job must keep its audio")
+        with open(b, "rb") as fh:
+            self.assertTrue(fh.read(16), "and it must still be readable")
+        jobs_mod.store().delete(second)
+
     def test_19_health(self):
         data = self.req("/api/health")
         self.assertTrue(data["ok"])

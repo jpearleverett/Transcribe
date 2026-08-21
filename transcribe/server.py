@@ -419,13 +419,20 @@ class Handler(BaseHTTPRequestHandler):
             if engine.needs_key and not engine.has_key():
                 return self.fail(f"{engine.label} needs an API key. Add one in Settings.")
 
-            # Copy the audio so deleting either job leaves the other playable.
+            # Hard-link rather than copy. Both jobs need the file to survive the
+            # other being deleted, and a link gives exactly that — the data goes
+            # only when the last reference does — without a second copy of a
+            # hundred-megabyte recording on a phone. Falls back to copying where
+            # links are unavailable.
             src = Path(job.audio_file)
             dest = config.UPLOAD_DIR / f"{int(time.time())}-{secrets.token_hex(4)}-{src.name.split('-', 2)[-1]}"
             try:
-                shutil.copy2(src, dest)
-            except OSError as e:
-                return self.fail(f"Could not copy the audio: {e}", 507)
+                os.link(src, dest)
+            except OSError:
+                try:
+                    shutil.copy2(src, dest)
+                except OSError as e:
+                    return self.fail(f"Could not duplicate the audio: {e}", 507)
 
             opts = dict(job.options or {})
             if "num_speakers" in body:
